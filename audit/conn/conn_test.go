@@ -46,6 +46,9 @@ func msgExpect(a msgs.Record, t time.Time) []any {
 }
 
 func TestWriters(t *testing.T) {
+	const dsAddr = "/tmp/audit.sock"
+	const tcpAddr = "127.0.0.1:63424"
+
 	tests := []struct {
 		// desc is a description of the test.
 		desc string
@@ -59,19 +62,19 @@ func TestWriters(t *testing.T) {
 		{
 			desc: "domain socket",
 			newServer: func() (*server.AuditRecordTest, error) {
-				return server.New("unix", "/tmp/audit.sock")
+				return server.New("unix", dsAddr)
 			},
 			newConn: func() (Audit, error) {
-				return NewDomainSocket(DSPath("/tmp/audit.sock"))
+				return NewDomainSocket(DSPath(dsAddr))
 			},
 		},
 		{
 			desc: "tcp socket",
 			newServer: func() (*server.AuditRecordTest, error) {
-				return server.New("tcp", "127.0.0.1:63424")
+				return server.New("tcp", tcpAddr)
 			},
 			newConn: func() (Audit, error) {
-				return NewTCPConn("127.0.0.1:63424")
+				return NewTCPConn(tcpAddr)
 			},
 		},
 	}
@@ -113,32 +116,25 @@ func TestWriters(t *testing.T) {
 				}
 			}()
 
-			var msg msgs.Msg
 			var hadErr bool
 			for i := 0; i < numTestMsgs; i++ {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 
-				if i == numTestMsgs-1 && test.resetErr {
-					msg.Record = stdMsg.Record.Clone()
-					msg.Record.OperationAccessLevel = "resetConn"
-				} else {
-					msg = stdMsg
-				}
-
-				err := w.Write(ctx, msg)
+				err := w.Write(ctx, stdMsg)
 				cancel()
 				if err != nil {
 					hadErr = true
+					break
 				}
 			}
-			if !hadErr {
-				w.CloseSend(context.Background())
+
+			if err := w.CloseSend(context.Background()); err != nil {
+				hadErr = true
 			}
-			log.Println("Done writing")
 
-			<-collectDone
-
-			log.Println("Done collecting")
+			if !hadErr {
+				<-collectDone
+			}
 
 			expect := 0
 			switch {

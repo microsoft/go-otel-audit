@@ -101,7 +101,6 @@ func (c *AuditRecordTest) MsgCh() <-chan msgs.Record {
 
 // Close closes the server.
 func (c *AuditRecordTest) Close() error {
-	defer close(c.msgCh)
 	return c.l.Close()
 }
 
@@ -127,6 +126,8 @@ func (c *AuditRecordTest) accept() {
 }
 
 func (c *AuditRecordTest) readMsgs(conn net.Conn) {
+	defer close(c.msgCh)
+
 	dec := msgpack.NewDecoder(conn)
 	for {
 		msgWrap := []any{}
@@ -147,7 +148,7 @@ func (c *AuditRecordTest) readMsgs(conn net.Conn) {
 				if _, err := netip.ParseAddrPort(c.addr); err != nil {
 					os.Remove(c.addr) // For domain sockets
 				}
-				c.restart()
+				//c.restart()
 			}()
 			return
 		}

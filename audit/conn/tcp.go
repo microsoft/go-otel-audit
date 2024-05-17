@@ -26,8 +26,8 @@ func (TCPConn) private() {}
 
 // NewTCPConn creates a new connection to the remote audit server. addr is the host:port of the remote audit server.
 // host can be an IP address or a hostname. If host is a hostname, it will be resolved to an IP address.
-func NewTCPConn(hostPort string) (TCPConn, error) {
-	conn, err := net.Dial("tcp", hostPort)
+func NewTCPConn(addr string) (TCPConn, error) {
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return TCPConn{}, err
 	}
