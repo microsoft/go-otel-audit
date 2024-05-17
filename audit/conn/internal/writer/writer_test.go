@@ -25,8 +25,11 @@ type fakeConn struct {
 }
 
 func (f *fakeConn) Write(b []byte) (int, error) {
-	f.buff.Write(b)
-	return len(b), nil
+	l, err := f.buff.Write(b)
+	if err != nil {
+		return 0, err
+	}
+	return l, nil
 }
 
 func TestWrite(t *testing.T) {
