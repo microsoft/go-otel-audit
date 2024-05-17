@@ -5,9 +5,18 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
+
+type fakeNetConn struct {
+	net.Conn
+}
+
+func (f fakeNetConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
 
 type fakeConn struct {
 	net.Conn
@@ -26,7 +35,7 @@ func TestWrite(t *testing.T) {
 		t.Fatalf("Failed to create a new message: %v", err)
 	}
 
-	fc := &fakeConn{buff: &bytes.Buffer{}}
+	fc := &fakeConn{Conn: fakeNetConn{}, buff: &bytes.Buffer{}}
 	c := New(fc)
 
 	if err := c.Write(context.Background(), msg); err != nil {
