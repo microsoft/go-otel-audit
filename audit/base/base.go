@@ -169,8 +169,10 @@ type Client struct {
 	settings Settings
 	// sendCh is the channel for sending audit records to our async sender. It has a buffer
 	// capacity of MaxQueueSize.
-	sendCh      chan streamData[SendMsg]
-	stopSend    chan chan struct{}
+	sendCh   chan SendMsg
+	stopSend chan chan struct{}
+	// successSend tracks if we've successfully sent at least one message to the audit server.
+	// This is so that we cans start the heartbeat only once a successful message has been sent.
 	successSend bool
 
 	// done is closed when the internal sender goroutine is done.
@@ -289,7 +291,7 @@ func New(c conn.Audit, options ...Option) (client *Client, err error) {
 		cli.heartbeat.Heartbeat.Language = "go" + cli.heartbeat.Heartbeat.Language
 	}
 
-	cli.sendCh = make(chan streamData[SendMsg], cli.settings.QueueSize)
+	cli.sendCh = make(chan SendMsg, cli.settings.QueueSize)
 	cli.stopSend = make(chan chan struct{}, 1)
 
 	go cli.sender()
@@ -365,7 +367,7 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case c.sendCh <- streamData[SendMsg]{Data: SendMsg{Ctx: ctx, Msg: msg}}:
+	case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
 	default:
 		return Error{Err: errors.New("queue is full"), Category: ErrQueueFull}
 	}
@@ -485,7 +487,7 @@ func (c *Client) sender() {
 			sig <- struct{}{}
 			return
 		case sm := <-c.sendCh:
-			c.write(sm.Data.Ctx, sm.Data.Msg)
+			c.write(sm.Ctx, sm.Msg)
 		case <-tickerCh:
 			c.write(ctxBack, c.heartbeat)
 		}
@@ -501,7 +503,7 @@ func (c *Client) write(ctx context.Context, msg msgs.Msg) {
 	if err := (*ptr).Write(ctx, msg); err != nil {
 		// Requeue the message if we can.
 		select {
-		case c.sendCh <- streamData[SendMsg]{Data: SendMsg{Ctx: ctx, Msg: msg}}:
+		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
 		default:
 			c.log.Error(fmt.Sprintf("audit message dropped due to queue being full: %v", err))
 		}
@@ -539,12 +541,6 @@ func (c *Client) getErr() error {
 		return *ptr
 	}
 	return nil
-}
-
-// streamData is a generic type for sending data to a channel.
-type streamData[T any] struct {
-	Data T
-	Err  error
 }
 
 // SendMsg holds the message to send and the context to use.

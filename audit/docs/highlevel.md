@@ -22,7 +22,7 @@ While this package is labelled OTEL (Open Telemetry), it is not an OTEL client. 
 - Connection agnostic, based on net.Conn
 - Support domain sockets and TCP on Linux (Windows support is not a goal)
 - Allow custom logging based on the new standard library `slog` package
-- Message validation so that bad messages never are transmitted
+- Message validation so that bad messages are never transmitted
 - Support for heartbeat messages after the first successful send
 - Eventual support for diagnostic message type
 
@@ -73,10 +73,10 @@ While this package is labelled OTEL (Open Telemetry), it is not an OTEL client. 
 
 - `audit/` contains our smart audit client with all the automatic connection handling and retries.
 - `base/` contains our basic client that gives a user more control, but requires more management
-- `conn/` contains are `conn.Audit` interface that all connection types must implement along with a domain socket and TCP implementation
-- `conn/internal/server` contains a fake server for receiving messages from a `conn.Audit` connection
+- `conn/` contains the `conn.Audit` interface that all connection types must implement along with a domain socket and TCP implementation
+- `conn/internal/server` contains a fake server for receiving messages from a `conn.Audit` connection, useful for testing purposes.
 - `conn/internal/writer` provides a generic `net.Conn` writer that can be used by upper-level packages in `conn`
-- `msgs` contains the messages that are sent to the audit server
+- `msgs` contains the messages that are sent to the audit server and msgpack serialization utilities
 
 ## Enhancements
 
@@ -136,7 +136,7 @@ However, I do decode messages in a fake server located in `audit/conn/internal/s
 
 To convert back to a concrete type, I convert to a type with `map[string]any`, marshal to `json` and finally unmarshal to our concrete type.
 
-Note to do this, I use the preview version of the `json` encoder for the Go standard library: `github.com/go-json-experiment/json`.
+Note to do this, I use the preview version of the `json` encoder for the Go standard library: `github.com/go-json-experiment/json`. This version is faster, more accurate in decoding, supports decoding `any` types into concrete types instead of `map[string]any`, etc... This module will become the stdlib `encoding/json/v2`.
 
 Note, I found a bug there around typed `uint8` when stored in `any`: 
 

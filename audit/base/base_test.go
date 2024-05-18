@@ -238,7 +238,7 @@ func TestSend(t *testing.T) {
 	tests := []struct {
 		name      string
 		client    *Client
-		sendCh    chan streamData[SendMsg]
+		sendCh    chan SendMsg
 		ctx       context.Context
 		fillQueue bool
 		msg       msgs.Msg
@@ -246,25 +246,25 @@ func TestSend(t *testing.T) {
 	}{
 		{
 			name:   "ValidSend",
-			sendCh: make(chan streamData[SendMsg], 1),
+			sendCh: make(chan SendMsg, 1),
 			msg:    msg,
 		},
 		{
 			name:   "ValidationErr",
-			sendCh: make(chan streamData[SendMsg], 1),
+			sendCh: make(chan SendMsg, 1),
 			msg:    invalidMsg,
 			err:    true,
 		},
 		{
 			name:      "QueueFull",
-			sendCh:    make(chan streamData[SendMsg], 1),
+			sendCh:    make(chan SendMsg, 1),
 			fillQueue: true,
 			msg:       msg,
 			err:       true,
 		},
 		{
 			name:   "ContextCancelled",
-			sendCh: make(chan streamData[SendMsg], 1),
+			sendCh: make(chan SendMsg, 1),
 			ctx:    cancelledCtx,
 			msg:    msg,
 			err:    true,
@@ -282,7 +282,7 @@ func TestSend(t *testing.T) {
 		// to choose ctx.Done() over the send channel.
 		if test.fillQueue || test.ctx.Err() != nil {
 			for {
-				sm := streamData[SendMsg]{Data: SendMsg{Ctx: context.Background(), Msg: msg}}
+				sm := SendMsg{Ctx: context.Background(), Msg: msg}
 				select {
 				case client.sendCh <- sm:
 					continue
