@@ -27,8 +27,8 @@ func TestIsUnrecoverable(t *testing.T) {
 		expected bool
 	}{
 		{"NilError", nil, false},
-		{"ErrConnection", Error{Err: errors.New("connection error"), Category: ErrConnection}, true},
-		{"ErrValidation", Error{Err: errors.New("validation error"), Category: ErrValidation}, false},
+		{"ErrConnection", ErrConnection, true},
+		{"ErrValidation", ErrValidation, false},
 	}
 
 	for _, test := range tests {
@@ -48,13 +48,13 @@ func TestIsQueueFull(t *testing.T) {
 		expected bool
 	}{
 		{"NilError", nil, false},
-		{"ErrQueueFull", Error{Err: errors.New("queue full error"), Category: ErrQueueFull}, true},
-		{"ErrConnection", Error{Err: errors.New("connection error"), Category: ErrConnection}, false},
+		{"ErrQueueFull", ErrQueueFull, true},
+		{"ErrConnection", ErrConnection, false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := IsQueueFull(test.err); got != test.expected {
+			if got := errors.Is(test.err, ErrQueueFull); got != test.expected {
 				t.Errorf("Expected IsQueueFull(%v) to return %v, but got %v", test.err, test.expected, got)
 			}
 		})
@@ -69,40 +69,16 @@ func TestIsValidationErr(t *testing.T) {
 		expected bool
 	}{
 		{"NilError", nil, false},
-		{"ErrValidation", Error{Err: errors.New("validation error"), Category: ErrValidation}, true},
-		{"ErrConnection", Error{Err: errors.New("connection error"), Category: ErrConnection}, false},
+		{"ErrValidation", ErrValidation, true},
+		{"ErrConnection", ErrConnection, false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := IsValidationErr(test.err); got != test.expected {
+			if got := errors.Is(test.err, ErrValidation); got != test.expected {
 				t.Errorf("Expected IsValidationErr(%v) to return %v, but got %v", test.err, test.expected, got)
 			}
 		})
-	}
-}
-
-func TestError(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		err            Error
-		expectedError  string
-		expectedUnwrap string
-	}{
-		{"ErrValidation", Error{Err: errors.New("test error"), Category: ErrValidation}, "ErrValidation: test error", "test error"},
-		{"ErrConnection", Error{Err: errors.New("test error"), Category: ErrConnection}, "ErrConnection: test error", "test error"},
-	}
-
-	for _, test := range tests {
-		if got := test.err.Error(); got != test.expectedError {
-			t.Errorf("TestError(%s): Expected Error() to return '%s', but got '%s'", test.name, test.expectedError, got)
-		}
-
-		if got := test.err.Unwrap().Error(); got != test.expectedUnwrap {
-			t.Errorf("TestError(%s): Expected Unwrap() to return '%s', but got '%s'", test.name, test.expectedUnwrap, got)
-		}
 	}
 }
 
@@ -118,7 +94,7 @@ func TestSettingsDefaults(t *testing.T) {
 		{
 			name:             "ZeroValue",
 			inputSettings:    Settings{},
-			expecteQueueSize: MaxQueueSize,
+			expecteQueueSize: DefaultQueueSize,
 		},
 		{
 			name: "ValidAttributesNotOverwritten",
@@ -132,7 +108,7 @@ func TestSettingsDefaults(t *testing.T) {
 			inputSettings: Settings{
 				QueueSize: -1, // Invalid value
 			},
-			expecteQueueSize: MaxQueueSize,
+			expecteQueueSize: DefaultQueueSize,
 		},
 	}
 
@@ -396,7 +372,7 @@ func TestResetOnRunningClient(t *testing.T) {
 	for i := 0; i < numMsgs; i++ {
 	tryAgain:
 		if err := client.Send(context.Background(), msg); err != nil {
-			if IsQueueFull(err) {
+			if errors.Is(err, ErrQueueFull) {
 				time.Sleep(100 * time.Nanosecond)
 				goto tryAgain
 			}

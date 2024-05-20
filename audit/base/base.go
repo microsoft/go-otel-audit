@@ -5,7 +5,7 @@ control over how the audit client behaves and wants to customize their own clien
 
 Use is simple, first construct your audit server connection, we will use a domain socket here:
 
-	c, err := domainsocket.New()
+	c, err := conn.NewDomainSocket()
 	if err != nil {
 		// Do something
 	}
@@ -70,91 +70,31 @@ import (
 // allocation every time we need a background context in this manner.
 var ctxBack = context.Background()
 
-// Default values for the audit client.
-const (
-	// MaxQueueSize is the maximum number of audit records that can be queued.
-	MaxQueueSize = 2048
-)
+// DefaultQueueSize is the number of audit records that can be queued by default.
+const DefaultQueueSize = 2048
 
-// ErrorCategory represents the category of an error.
-//
-//go:generate stringer -type=ErrorCategory
-type ErrorCategory uint8
-
-const (
-	// UnknownErrorCategory is an unknown error category. This indicates a bug in the audit client.
-	UnknownErrorCategory ErrorCategory = 0
+var (
 	// ErrValidation is an error that occurred during validation of an audit record.
 	// This means the audit record is invalid and was not sent.
-	ErrValidation ErrorCategory = 1
+	ErrValidation = errors.New("validation error")
 	// ErrConnection is an error that occurred while connecting to the audit server.
 	// This means the audit client is in an unrecoverable state. Getting this error means that every
 	// other call to the client will fail with the same message.
-	ErrConnection ErrorCategory = 2
-	// ErrQueueFull is an error that occurred because the queue is full.
-	ErrQueueFull ErrorCategory = 3
+	ErrConnection = errors.New("connection error")
+	// ErrQueueFull is an error that occurred because the queue is full. The message was not sent or
+	// requeued.
+	ErrQueueFull = errors.New("queue full")
 	// ErrTimeout is an error that occurred because the send timed out.
-	ErrTimeout ErrorCategory = 4
+	ErrTimeout = errors.New("timeout")
 )
 
-// Error represents an error that occurred in this package. All errors returned by this package
-// are of type Error.
-type Error struct {
-	// Err is the underlying error.
-	Err error
-	// Category is the category of the error.
-	Category ErrorCategory
-}
-
-// Error returns the error message.
-func (e Error) Error() string {
-	return fmt.Sprintf("%s: %s", e.Category, e.Err.Error())
-}
-
-// Unwrap returns the underlying error.
-func (e Error) Unwrap() error {
-	return e.Err
-}
-
-// IsUnrecoverable returns true if the error is unrecoverable. This only works on
-// errors of type Error (from this package). If not Error, this returns false. Unrecoverable errors
-// mean that the audit client should not attempt to send any more audit records as the
-// client is in an unrecoverable state (e.g. the connection is dead).
+// IsUnrecoverable returns true if the error is unrecoverable.
+// Unrecoverable errors mean that the audit client should not attempt to send any more audit
+// records as the client is in an unrecoverable state (e.g. the connection is dead).
 func IsUnrecoverable(err error) bool {
-	if err == nil {
-		return false
+	if errors.Is(err, ErrConnection) {
+		return true
 	}
-
-	if e, ok := err.(Error); ok {
-		return e.Category == ErrConnection
-	}
-
-	return false
-}
-
-// IsQueueFull returns true if the error is because the queue is full.
-func IsQueueFull(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if e, ok := err.(Error); ok {
-		return e.Category == ErrQueueFull
-	}
-
-	return false
-}
-
-// IsValidationErr returns true if the error is because the audit record is invalid.
-func IsValidationErr(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if e, ok := err.(Error); ok {
-		return e.Category == ErrValidation
-	}
-
 	return false
 }
 
@@ -172,7 +112,7 @@ type Client struct {
 	sendCh   chan SendMsg
 	stopSend chan chan struct{}
 	// successSend tracks if we've successfully sent at least one message to the audit server.
-	// This is so that we cans start the heartbeat only once a successful message has been sent.
+	// This is so that we can start the heartbeat only once a successful message has been sent.
 	successSend bool
 
 	// done is closed when the internal sender goroutine is done.
@@ -217,7 +157,7 @@ type Settings struct {
 // defaults sets the default values for the settings. It returns a copy of settings to avoid an allocation.
 func (s Settings) defaults() Settings {
 	if s.QueueSize < 1 {
-		s.QueueSize = MaxQueueSize
+		s.QueueSize = DefaultQueueSize
 	}
 	return s
 }
@@ -248,7 +188,7 @@ func WithLogger(l *slog.Logger) Option {
 // New returns a new audit client.
 func New(c conn.Audit, options ...Option) (client *Client, err error) {
 	if c == nil {
-		return nil, Error{Err: fmt.Errorf("cannot pass a conn.Audit that is nil"), Category: ErrConnection}
+		return nil, fmt.Errorf("cannot pass a conn.Audit that is nil: %w", ErrConnection)
 	}
 
 	cli := &Client{
@@ -336,40 +276,34 @@ that occur due to unrecoverable errors are put back into the  queue until that q
 Whenever a ErrQueueFull message occurs, the message being sent is dropped and you must deal with the message
 yourself.
 
-Send honors Context cancellation. If the context is canceled, the send will get cancelled. A Context timeout
-will not cause an error return as the connection is still valid. If using a timeout on the Context, make sure to
-use a new Context for each Send(). If using the parent Context, it is recommended to do context.WithoutCancel(ctx)
-to prevent accidental cancellation. It is better to let queue full errors happen and handle them than to use
-a context timeout.
+Send does not honor Context cancellation.
 
 Errors that are Unrecoverable or context cancelled will be sent to Recover(). It is up to the caller
 to either handle these errors or ignore them. If you ignore them, you will lose audit records.
 */
 func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 	if msg.Type == msgs.ATUnknown || msg.Type > msgs.ControlPlane {
-		return Error{Err: fmt.Errorf("audit type (%d is invalid", msg.Type), Category: ErrValidation}
+		return fmt.Errorf("audit type (%v) is invalid: %w", msg.Type, ErrValidation)
 	}
 
 	if err := msg.Record.Validate(); err != nil {
-		return Error{Err: err, Category: ErrValidation}
+		return fmt.Errorf("%w: %w", err, ErrValidation)
 	}
 
 	if msg.Record.Hook != nil {
 		var err error
 		msg.Record, err = msg.Record.Hook(msg.Record)
 		if err != nil {
-			return Error{Err: err, Category: ErrValidation}
+			return fmt.Errorf("%w: %w", err, ErrValidation)
 		}
 	}
 
 	// We always want to send the message unless the queue is full or the context times out
 	// before we get to send the message.
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
 	case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
 	default:
-		return Error{Err: errors.New("queue is full"), Category: ErrQueueFull}
+		return ErrQueueFull
 	}
 
 	// If we had any errors previously, we need to return them.
@@ -385,14 +319,15 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 // This is thread safe.
 func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 	if c == nil {
-		return Error{Err: fmt.Errorf("cannot call Reset on a base.Client that is nil"), Category: ErrConnection}
+		return fmt.Errorf("cannot call Reset on a base.Client that is nil: %w", ErrConnection)
 	}
 	if newConn == nil {
-		return Error{Err: fmt.Errorf("cannot pass a conn.Audit that is nil"), Category: ErrConnection}
+		return fmt.Errorf("cannot pass a conn.Audit that is nil: %w", ErrConnection)
 	}
 
 	// If for some reason there is no error happening, we need to set one to prevents sends.
-	c.setErr(Error{Err: fmt.Errorf("audit client Reset() called, resetting connection"), Category: ErrConnection})
+
+	c.setErr(fmt.Errorf("audit client Reset() called, resetting connection: %w", ErrConnection))
 
 	// If the connection is live, we need to close it.
 	c.close(ctx, false)
@@ -454,7 +389,7 @@ func (c *Client) close(ctx context.Context, stopSender bool) error {
 		ptr := c.conn.Load()
 		if ptr != nil {
 			if err := (*ptr).CloseSend(ctx); err != nil {
-				c.setErr(Error{Err: err, Category: ErrConnection})
+				c.setErr(fmt.Errorf("%w: %w", err, ErrConnection))
 			}
 		}
 	})
@@ -512,7 +447,7 @@ func (c *Client) write(ctx context.Context, msg msgs.Msg) {
 			c.log.Error(fmt.Sprintf("audit message had context cancellation: %s", err))
 			return
 		}
-		c.setErr(Error{Err: err, Category: ErrConnection})
+		c.setErr(fmt.Errorf("%w: %w", err, ErrConnection))
 		return
 	}
 	c.successSend = true

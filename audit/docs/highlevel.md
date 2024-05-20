@@ -102,9 +102,7 @@ With `TCP` and `domain sockets` that are missing the overhead of an upper level 
 
 What this boils down to is that with less mechanics we can be more efficient and have a simpler client.
 
-In addition, I did not keep any of the default timeouts. If a user wants to timeout messages, then they can set it via the `context.Context` object. This is the standard for Go in the modern era.  
-
-However, timeout of security related messages for Go is just a bad idea. Relying on TCP backoff mechansims or domain socket blocking should be more reliable mechanism when paired with immediate returns when your buffered channel is full.  I almost removed honoring cancellation at all, because you can get subtle bugs by passing a parent Context that gets cancelled. I noted in the SDK that you need to use `context.WithoutCancel()` on calls to avoid this. We may want to change this in the future, because I'm not really sure of a valid use case in our model.
+In addition, I did not keep any of the default timeouts. This just doesn't make sense in an asyncronous client where we can't tell which messages are more important that others.
 
 ## The Geneva Message Format
 
