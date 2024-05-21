@@ -353,11 +353,23 @@ func (c *Client) Close(ctx context.Context) error {
 // wait waits for the client to finish sending all messages. This is determined by the queue
 // being empty.
 func (c *Client) wait() {
+	doneWaiting := make(chan struct{})
+	go func() {
+		defer close(doneWaiting)
+		for {
+			if len(c.sendCh) == 0 {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
 	for {
-		if len(c.sendCh) == 0 {
+		select {
+		case <-time.After(10 * time.Second):
+			c.log.Info("waiting for audit log base client to send all messages after a Close()")
+		case <-doneWaiting:
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
