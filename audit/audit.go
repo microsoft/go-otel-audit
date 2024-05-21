@@ -41,6 +41,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -48,9 +49,9 @@ import (
 	"testing"
 	"time"
 
-	"element-of-surprise/audit/audit/base"
-	"element-of-surprise/audit/audit/conn"
-	"element-of-surprise/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/base"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 
 	"github.com/Azure/retry/exponential"
 )
@@ -60,7 +61,7 @@ type NotifyError struct {
 	// Time is the time the error occurred.
 	Time time.Time
 	// Err is the error that happened. This will be a an base.ErrConnection or base.ErrQueueFull .
-	Err base.Error
+	Err error
 }
 
 // Client is an audit server smart client. This handles any connection problems silently, while providing ways to
@@ -186,11 +187,11 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 			c.replaceBackoffRunner(ctx) // Dropping error on purpose
 			return nil
 		}
-		if base.IsQueueFull(err) {
-			c.sendNotification(base.Error{Err: err, Category: base.ErrQueueFull})
+		if errors.Is(err, base.ErrQueueFull) {
+			c.sendNotification(err)
 			return err
 		}
-		if base.IsValidationErr(err) {
+		if errors.Is(err, base.ErrValidation) {
 			return err
 		}
 		return fmt.Errorf("bug: error sending audit record that is uncategorized: %w", err)
@@ -236,14 +237,14 @@ func (c *Client) replace(ctx context.Context) error {
 	// Create a new connection.
 	newConn, err := c.create()
 	if err != nil {
-		c.sendNotification(base.Error{Err: fmt.Errorf("error while trying to make a new connection: %w", err), Category: base.ErrConnection})
+		c.sendNotification(fmt.Errorf("error while trying to make a new connection: %w", err))
 		return err
 	}
 
 	// Reset the client with the new connection.
 	if err := c.client.Reset(ctx, newConn); err != nil {
 		c.client.Logger().Error(fmt.Sprintf("error while trying to make a new client: %v", err))
-		c.sendNotification(base.Error{Err: fmt.Errorf("error while trying to make a new client: %w", err), Category: base.ErrConnection})
+		c.sendNotification(fmt.Errorf("error while trying to make a new client: %w", err))
 		// This should nevever happen, because the only thing that causes an error is that create() is returning
 		// nil. In that case, the error is permanent and we should cancel retries.
 		return fmt.Errorf("%w: %w", err, exponential.ErrPermanent)
@@ -252,8 +253,8 @@ func (c *Client) replace(ctx context.Context) error {
 }
 
 // sendNotification sends a notification to the notifier channel. If the channel is full, the notification is dropped.
-func (c *Client) sendNotification(err base.Error) {
-	if err.Err == nil {
+func (c *Client) sendNotification(err error) {
+	if err == nil {
 		return
 	}
 

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"element-of-surprise/audit/audit/base"
-	"element-of-surprise/audit/audit/conn"
-	"element-of-surprise/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/base"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 func TestSend(t *testing.T) {
@@ -30,7 +30,7 @@ func TestSend(t *testing.T) {
 			name: "Error: IsUnrecoverable()",
 			client: &Client{
 				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
-					return base.Error{Err: errors.New("error"), Category: base.ErrConnection}
+					return base.ErrConnection
 				},
 				replaceBackoffRunner: func(ctx context.Context) error {
 					replaceRan = true
@@ -43,7 +43,7 @@ func TestSend(t *testing.T) {
 			name: "Error: IsQueueFull()",
 			client: &Client{
 				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
-					return base.Error{Err: errors.New("error"), Category: base.ErrQueueFull}
+					return base.ErrQueueFull
 				},
 				notifier: make(chan NotifyError, 1),
 			},
@@ -54,7 +54,7 @@ func TestSend(t *testing.T) {
 			name: "Error: IsValidationErr()",
 			client: &Client{
 				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
-					return base.Error{Err: errors.New("error"), Category: base.ErrValidation}
+					return base.ErrValidation
 				},
 			},
 			err: true,
@@ -219,7 +219,7 @@ func TestSendNotification(t *testing.T) {
 
 	// Send without an error.
 	client := Client{notifier: make(chan NotifyError, 1)}
-	client.sendNotification(base.Error{})
+	client.sendNotification(nil)
 	select {
 	case <-client.notifier:
 		t.Fatalf("TestSendNotification(sent NotifyError with no error): got NotifyError, expected message drop")
@@ -228,13 +228,13 @@ func TestSendNotification(t *testing.T) {
 
 	// Send with room in channel.
 	client = Client{notifier: make(chan NotifyError, 1)}
-	client.sendNotification(base.Error{Err: errors.New("error"), Category: base.ErrQueueFull})
+	client.sendNotification(base.ErrQueueFull)
 	select {
 	case notice := <-client.notifier:
 		if notice.Time.IsZero() {
 			t.Fatalf("TestSendNotification(sent NotifyError with error): got Time zero, expected non-zero")
 		}
-		if notice.Err.Err == nil {
+		if notice.Err == nil {
 			t.Fatalf("TestSendNotification(sent NotifyError with error): got NotifyError.Err.Err == nil, expected non-nil")
 		}
 	default:
@@ -243,7 +243,7 @@ func TestSendNotification(t *testing.T) {
 
 	// Send with no room in channel.
 	client = Client{notifier: make(chan NotifyError)}
-	client.sendNotification(base.Error{Err: errors.New("error"), Category: base.ErrQueueFull})
+	client.sendNotification(base.ErrQueueFull)
 	select {
 	case <-client.notifier:
 		t.Fatalf("TestSendNotification(sent NotifyError with error, but no room in queue): got NotifyError, expected message drop")
@@ -345,7 +345,7 @@ func TestResetHappensOnClient(t *testing.T) {
 	for i := 0; i < numMsgs; i++ {
 	tryAgain:
 		if err := client.Send(context.Background(), msg); err != nil {
-			if base.IsQueueFull(err) {
+			if errors.Is(err, base.ErrQueueFull) {
 				time.Sleep(100 * time.Millisecond)
 				goto tryAgain
 			}
