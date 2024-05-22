@@ -15,6 +15,8 @@ Example using the domainsocket package:
 		return conn.NewDomainSocket()
 	}
 
+	// Creates the smart client to the remote audit server.
+	// You should only create one of these, preferrably in main().
 	c, err := audit.New(cc)
 	if err != nil {
 		// Handle error.
@@ -34,7 +36,9 @@ Example using the domainsocket package:
 		// Handle error.
 		// Errors here will either be:
 		// 1. base.ErrValidation , which means your message is invalid.
-		// 2. A standard error, which means there is an error condition we haven't categorized yet.
+		// 2. base.ErrQueueFull, which means the queue is full and you are responsible for the message.
+		// 3. A standard error, which means there is an error condition we haven't categorized yet.
+		// If #3 happens, please file a bug report as we shouldn't send non-categorized errors to the user.
 	}
 */
 package audit
@@ -60,15 +64,14 @@ import (
 type NotifyError struct {
 	// Time is the time the error occurred.
 	Time time.Time
-	// Err is the error that happened. This will be a an base.ErrConnection or base.ErrQueueFull .
+	// Err is the error that happened. This will be a an base.ErrConnection or base.ErrQueueFull.
 	Err error
 }
 
 // Client is an audit server smart client. This handles any connection problems silently, while providing ways to
 // detect problems through whatever alerting method is desired.
 type Client struct {
-	// client holds the current audit client. If this is nil, it means we are trying to get a new client.
-	// When that occurs, we will do a noop on Send().
+	// client holds the current audit client.
 	client *base.Client
 	// replaceClient is used to ensure we only replace the client once. This is needed because we can have multiple
 	// goroutines trying to replace the client at the same time.
@@ -129,7 +132,7 @@ func New(create CreateConn, options ...Option) (*Client, error) {
 
 	if runtime.GOOS != "linux" && !testing.Testing() {
 		if connect.Type() != conn.TypeNoOP {
-			return nil, fmt.Errorf("audit: only linux is clients can use Audit with non-NoOp connections")
+			return nil, fmt.Errorf("audit: only linux clients can use Audit with a non-NoOp conn.Audit type")
 		}
 	}
 
@@ -178,9 +181,7 @@ func (c *Client) Notify() <-chan NotifyError {
 // but you will not receive an error. The only errors that will be returned are due to the Record being
 // invalid, trying to send a Msg with a type not DataPlane or ControlPlane or when we receive an
 // uncategorized error (which always indicates a handling bug in the Client).
-// Context timeouts will cause the write to drop, but not an error as all sends are
-// non-blocking. As a rule, you should not use Context timeouts as this is async. As a best practice,
-// you should do client.Send(context.WithoutCancel(ctx), msg) to prevent timeouts.
+// Context timeouts are not honored.
 func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 	if err := c.sendRunner(ctx, msg); err != nil {
 		if base.IsUnrecoverable(err) {
@@ -203,7 +204,6 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 func (c *Client) Close(ctx context.Context) error {
 	defer close(c.notifier)
 
-	// We do a noop if the client is nil, indicating we are trying to get a new client.
 	if c.client == nil {
 		return nil
 	}
