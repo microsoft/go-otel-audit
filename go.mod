@@ -25,7 +25,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/vmihailenco/tagparser v0.1.1 // indirect
-	golang.org/x/net v0.0.0-20200301022130-244492dfa37a // indirect
+	golang.org/x/net v0.23.0 // indirect
 	google.golang.org/appengine v1.6.5 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
