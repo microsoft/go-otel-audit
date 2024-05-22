@@ -31,8 +31,13 @@ type dsOptions struct {
 }
 
 func (o *dsOptions) setDefaults() {
+	// https://eng.ms/docs/products/geneva/collect/instrument/linux/fluent
+	// Each path works the same, but they upload to different tenants.
 	const (
-		asaSocket    = "/var/run/mdsd/asa/default_fluent.socket"
+		// asaSocket is the socket that is configured if AzSecPack AutoConfig is enabled.
+		asaSocket = "/var/run/mdsd/asa/default_fluent.socket"
+		// fluentSocket is the socket that is configured if AzSecPack AutoConfig is disabled
+		// or out of scope.
 		fluentSocket = "/var/run/mdsd/default_fluent.socket"
 	)
 	if o.path != "" {
