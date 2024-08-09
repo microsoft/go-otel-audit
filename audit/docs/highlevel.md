@@ -1,7 +1,7 @@
 # OTEL Security Logging For Go Client
 
 <p align="center">
-  <img src="detective.jpeg" width="50%"/>
+  <img src="./img/detective.jpeg" width="50%"/>
 </p>
 
 ## Introduction
@@ -124,7 +124,7 @@ So you need to use `msgpack` for serialization. The format in Go, roughly comes 
 ```
 Geneva isn't using strict arrays of a size as I am doing here, instead they are a vector of entries. I assume this is to allow bulk transmission. But the OTEL client always packs a message like this, so we can use strict arrays to avoid allocations (where slices will allocate).
 
-As a note, this client is only responsible for sending messages to a server, not decoding them. 
+As a note, this client is only responsible for sending messages to a server, not decoding them.
 
 However, I do decode messages in a fake server located in `audit/conn/internal/server`. Because of what I consider a bug in `msgpack`, you cannot unmarshal `any` fields into a concrete type, but instead must unmarshal to `map[string]any`. I have reported that to the `msgpack` author, but I don't expect this to be fixed. Here are various bugs I reported:
 
@@ -136,7 +136,7 @@ To convert back to a concrete type, I convert to a type with `map[string]any`, m
 
 Note to do this, I use the preview version of the `json` encoder for the Go standard library: `github.com/go-json-experiment/json`. This version is faster, more accurate in decoding, supports decoding `any` types into concrete types instead of `map[string]any`, etc... This module will become the stdlib `encoding/json/v2`.
 
-Note, I found a bug there around typed `uint8` when stored in `any`: 
+Note, I found a bug there around typed `uint8` when stored in `any`:
 
 * https://github.com/go-json-experiment/json/issues/36
 
@@ -203,9 +203,9 @@ In a syncronous client, each one of these is a series of problems for the servic
 
 You could try to handle this with timeouts, but that is a fairly crude way of doing this. You are just adding latency all over the place when a problem with logging occurs.
 
-In any of the failure scenarios, if someone forgets a timeout (and you support timeouts), the service is stuck until logging works. That is a sev0 where heads are going to roll. 
+In any of the failure scenarios, if someone forgets a timeout (and you support timeouts), the service is stuck until logging works. That is a sev0 where heads are going to roll.
 
-This client is adjustable. We are async in nature, but we have a queue. You can make the queue as large as you want. If you want to start blocking on queue full errors for some time period, the service can do that. You can write the messages to disk and restart sending them when the client is sending again. You have a notifcation system to pop alerts to you that bad things are happening. 
+This client is adjustable. We are async in nature, but we have a queue. You can make the queue as large as you want. If you want to start blocking on queue full errors for some time period, the service can do that. You can write the messages to disk and restart sending them when the client is sending again. You have a notifcation system to pop alerts to you that bad things are happening.
 
 But what never happens is that the serivce utilizing the logger blocks without the service owner making that decision explicitly. And the service owner is never in the dark when any event happens.
 
@@ -220,8 +220,8 @@ This package uses the `unsafe` package. This sometimes causes undue alarm. Unsaf
 
 Our use is limited to preventing a copy from occuring when doing string conversion from the `[]byte` types to `string`.
 
-This prevents an extra allocation. 
- 
+This prevents an extra allocation.
+
 We do this at the unmarshalling boundary to convert to a string and do the lookup of what `uint*` value the `string` stands for. The `[]byte` object is never touched again and we throw away both the `[]byte` and the `string` after the operation.
 
 This is a safe operation and as pointed out above, basically every line of `C` and `C++` is unsafe, we are doing this in a single location once.
@@ -234,7 +234,7 @@ Developers don't want clients that look the same, they want clients that feel na
 
 Also, most developers are likely to do work with a service in at most 2 languages, the second language being a frontend langauge. C# and Go are direct competitors, so a project is likely to only use one of them. And this package is not really used in the frontend.
 
-Where you can really help out developers would be to use something like protocol buffers for the message structure. Even if you are not going to use protocol buffer encoding. 
+Where you can really help out developers would be to use something like protocol buffers for the message structure. Even if you are not going to use protocol buffer encoding.
 
 This is because it forces a more generic structure that works in all languages. It also tends to keep you from using language specific types that have to be recreated in other languages. You don't have to re-create message types when adding support for a new language. That gets you more consistency with much less burden for the internal dev team, but allows you to customize clients.
 
