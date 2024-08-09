@@ -1,7 +1,7 @@
 # Go OTEL Audit
 
 <p align="center">
-  <img src="./img/detective.jpeg" width="50%"/>
+  <img src="./audit/docs/img/detective.jpeg" width="50%"/>
 </p>
 
 The Go OTEL Audit provides a package for auditing Go code for Microsoft compliance purposes. This package
