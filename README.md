@@ -14,11 +14,16 @@ While everything in this is publically available, the main audience is Microsoft
 Using this package will require some service setup that is beyond the scope of this guide.
 If you are a Microsoft first party developer, please see our internal guides.
 
-The package is designed to by asyncronous and non-blocking. A blocked send will return an error.
+The package is designed to be asyncronous and non-blocking. A blocked send will return an error.
 You can then decide what to do with the message that was sent. This allows you to build services that
 do not slow down or block on audit messages.
 
-Here is a quick example of how to use the package with a domain socket listener:
+The package also comes in two flavors: the `base` package and the `audit` package. The `base` package
+is a lower level package that allows you to send messages to the audit server. The `audit` package is a
+higher level package that allows you to send messages to the audit server and also handles the connection
+(and any reconnections) to the audit server.
+
+Here is a quick example of how to use the `audit` package with a domain socket listener:
 
 ```go
 
