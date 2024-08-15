@@ -1,6 +1,6 @@
 module github.com/microsoft/go-otel-audit
 
-go 1.21.3
+go 1.22.1
 
 toolchain go1.22.4
 
