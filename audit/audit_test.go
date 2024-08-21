@@ -21,11 +21,21 @@ func TestSend(t *testing.T) {
 	tests := []struct {
 		name             string
 		client           *Client
-		baseClient       *base.Client
+		clientClosed     bool
 		wantRanReplace   bool
 		wantNotification bool
 		err              bool
 	}{
+		{
+			name: "Error: client closed",
+			client: &Client{
+				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+					return nil
+				},
+			},
+			clientClosed: true,
+			err:          true,
+		},
 		{
 			name: "Error: IsUnrecoverable()",
 			client: &Client{
@@ -81,6 +91,8 @@ func TestSend(t *testing.T) {
 	for _, test := range tests {
 		replaceRan = false
 
+		test.client.closed.Store(test.clientClosed)
+
 		err := test.client.Send(context.Background(), msgs.Msg{})
 		switch {
 		case test.err && err == nil:
@@ -134,7 +146,15 @@ func TestClose(t *testing.T) {
 		if err != nil {
 			t.Errorf("TestClose(%s): got err == %s", test.name, err)
 		}
-		<-test.client.Notify() // Make sure the notifer is closed.
+		select {
+		case <-test.client.Notify(): // Make sure the notifer is closed.
+		case <-time.After(1 * time.Second):
+			t.Errorf("TestClose(%s): notifier was not closed", test.name)
+		}
+
+		if !test.client.closed.Load() {
+			t.Errorf("TestClose(%s): got client.closed == false, want client.closed == true", test.name)
+		}
 	}
 }
 

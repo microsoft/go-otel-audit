@@ -96,6 +96,8 @@ type Client struct {
 	// sendRunner is a function that sends a message to the remote audit server.
 	// In production, this uses .client.Sent(). In testing this can be replaced with a function that does nothing.
 	sendRunner func(ctx context.Context, msg msgs.Msg) error
+
+	closed atomic.Bool
 }
 
 // CreateConn is a function that creates a connection to a remote audit server.
@@ -168,6 +170,7 @@ func New(create CreateConn, options ...Option) (*Client, error) {
 	c.client = aClient
 	c.sendRunner = c.client.Send
 
+	c.closed.Store(false)
 	return c, nil
 }
 
@@ -179,10 +182,14 @@ func (c *Client) Notify() <-chan NotifyError {
 
 // Send sends a message to the remote audit server. If the connection is broken, it will attempt to reconnect
 // but you will not receive an error. The only errors that will be returned are due to the Record being
-// invalid, trying to send a Msg with a type not DataPlane or ControlPlane or when we receive an
-// uncategorized error (which always indicates a handling bug in the Client).
-// Context timeouts are not honored.
+// invalid, trying to send a Msg with a type not DataPlane/ControlPlane, when we receive an
+// uncategorized error (which always indicates a handling bug in the Client) or if Close() has been
+// called. Context timeouts are not honored.
 func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
+	if c.closed.Load() {
+		return fmt.Errorf("audit: client is closed")
+	}
+
 	if err := c.sendRunner(ctx, msg); err != nil {
 		if base.IsUnrecoverable(err) {
 			c.replaceBackoffRunner(ctx) // Dropping error on purpose
@@ -202,8 +209,11 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 
 // Close closes the connection to the remote audit server.
 func (c *Client) Close(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
 	defer close(c.notifier)
-
+	defer func() { c.closed.Store(true) }()
 	if c.client == nil {
 		return nil
 	}
