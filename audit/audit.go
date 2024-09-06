@@ -47,6 +47,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
 	"runtime"
 	"sync/atomic"
@@ -187,28 +188,37 @@ func (c *Client) Notify() <-chan NotifyError {
 // called. Context timeouts are not honored.
 func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 	if c.closed.Load() {
+		log.Println("Send called on closed client")
 		return fmt.Errorf("audit: client is closed")
 	}
 
 	if err := c.sendRunner(ctx, msg); err != nil {
 		if base.IsUnrecoverable(err) {
+			log.Printf("Send had unrecoverable error(%s) and we called replaceBackoffRunner()", err)
 			c.replaceBackoffRunner(ctx) // Dropping error on purpose
 			return nil
 		}
 		if errors.Is(err, base.ErrQueueFull) {
+			log.Printf("Send had a ErrQueueFull error, we are going to send an error notification")
 			c.sendNotification(err)
+			log.Println("error notification sent")
 			return err
 		}
 		if errors.Is(err, base.ErrValidation) {
+			log.Printf("Send had a ErrValidation error: %s", err)
 			return err
 		}
+		log.Println("Send had an uncategorized error: ", err)
 		return fmt.Errorf("bug: error sending audit record that is uncategorized: %w", err)
 	}
+	log.Println("send called without error")
 	return nil
 }
 
 // Close closes the connection to the remote audit server.
 func (c *Client) Close(ctx context.Context) error {
+	log.Println("closing audit client")
+	defer log.Println("closed audit client")
 	if c == nil {
 		return nil
 	}

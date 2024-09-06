@@ -53,6 +53,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"runtime"
 	"strings"
@@ -283,33 +284,44 @@ to either handle these errors or ignore them. If you ignore them, you will lose 
 */
 func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 	if msg.Type == msgs.ATUnknown || msg.Type > msgs.ControlPlane {
+		log.Printf("base.Client.Send(): msg.Type is invalid")
 		return fmt.Errorf("audit type (%v) is invalid: %w", msg.Type, ErrValidation)
 	}
 
 	if err := msg.Record.Validate(); err != nil {
+		log.Printf("base.Client.Send(): validation error: %s", err)
 		return fmt.Errorf("%w: %w", err, ErrValidation)
 	}
 
 	if msg.Record.Hook != nil {
+		log.Printf("base.Client.Send(): calling msg.Record.Hook()")
 		var err error
 		msg.Record, err = msg.Record.Hook(msg.Record)
 		if err != nil {
+			log.Printf("base.Client.Send(): msg.Record.Hook() had error: %s", err)
 			return fmt.Errorf("%w: %w", err, ErrValidation)
 		}
+		log.Printf("base.Client.Send(): msg.Record.Hook() returned")
 	}
 
 	// We always want to send the message unless the queue is full or the context times out
 	// before we get to send the message.
+	log.Printf("base.Client.Send(): sending message on channel")
 	select {
 	case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
+		log.Printf("base.Client.Send(): message sent on channel")
 	default:
+		log.Printf("base.Client.Send(): queue is full")
 		return ErrQueueFull
 	}
 
 	// If we had any errors previously, we need to return them.
+	log.Printf("base.Client.Send(): checking for previous errors")
 	if err := c.getErr(); err != nil {
+		log.Printf("base.Client.Send(): previous errors found")
 		return err
 	}
+	log.Printf("base.Client.Send(): finished")
 	return nil
 }
 
@@ -318,6 +330,9 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 // This will cause an existing connection to be closed and reset internal state.
 // This is thread safe.
 func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
+	log.Printf("base.Client.Reset(): called")
+	defer log.Printf("base.Client.Reset(): finished")
+
 	if c == nil {
 		return fmt.Errorf("cannot call Reset on a base.Client that is nil: %w", ErrConnection)
 	}
@@ -346,6 +361,8 @@ func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 
 // Close closes the connection to the audit server.
 func (c *Client) Close(ctx context.Context) error {
+	log.Printf("base.Client.Close(): called")
+	defer log.Printf("base.Client.Close(): finished")
 	c.wait()
 	return c.close(ctx, true)
 }
@@ -376,6 +393,9 @@ func (c *Client) wait() {
 // close handles closing the connection to the audit server. This is used by Close().
 // It ensures that the connection is only closed once.
 func (c *Client) close(ctx context.Context, stopSender bool) error {
+	log.Printf("base.Client.close(): called")
+	defer log.Printf("base.Client.close(): finished")
+
 	c.closeOnceMu.Lock()
 	defer c.closeOnceMu.Unlock()
 
@@ -423,21 +443,30 @@ func (c *Client) sender() {
 
 	for {
 		if c.successSend && ticker == nil {
+			log.Println("sending an initial heartbeat")
 			c.write(ctxBack, c.heartbeat)
+			log.Println("initial heartbeat sent")
 			ticker = time.NewTicker(c.heartbeatInterval)
 			tickerCh = ticker.C
 		}
 
+		log.Println("base.Client.sender(): waiting for select")
 		select {
 		case sig := <-c.stopSend:
+			log.Printf("base.Client.sender(): stopSend received")
 			// Let the other side know we are done.
 			sig <- struct{}{}
 			return
 		case sm := <-c.sendCh:
+			log.Printf("base.Client.sender(): sendCh received, calling write()")
 			c.write(sm.Ctx, sm.Msg)
+			log.Printf("base.Client.sender(): write() finished")
 		case <-tickerCh:
+			log.Printf("base.Client.sender(): sending heartbeat")
 			c.write(ctxBack, c.heartbeat)
+			log.Printf("base.Client.sender(): heartbeat sent")
 		}
+		log.Println("base.Client.sender(): select finished")
 	}
 }
 
@@ -447,21 +476,26 @@ func (c *Client) write(ctx context.Context, msg msgs.Msg) {
 		return
 	}
 
+	log.Println("base.Client.write(): calling conn.Audit.Write()")
 	if err := (*ptr).Write(ctx, msg); err != nil {
 		// Requeue the message if we can.
 		select {
 		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
+			log.Println("base.Client.write(): sendError requeued message")
 		default:
+			log.Println("base.Client.write(): sendError dropped message")
 			c.log.Error(fmt.Sprintf("audit message dropped due to queue being full: %v", err))
 		}
 
 		if err == context.Canceled {
+			log.Println("base.Client.write(): context cancelled")
 			c.log.Error(fmt.Sprintf("audit message had context cancellation: %s", err))
 			return
 		}
 		c.setErr(fmt.Errorf("%w: %w", err, ErrConnection))
 		return
 	}
+	log.Println("base.Client.write(): conn.Audit.Write() finished")
 	c.successSend = true
 }
 
