@@ -29,7 +29,7 @@ func TestSend(t *testing.T) {
 		{
 			name: "Error: client closed",
 			client: &Client{
-				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+				sendRunner: func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 					return nil
 				},
 			},
@@ -39,7 +39,7 @@ func TestSend(t *testing.T) {
 		{
 			name: "Error: IsUnrecoverable()",
 			client: &Client{
-				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+				sendRunner: func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 					return base.ErrConnection
 				},
 				replaceBackoffRunner: func(ctx context.Context) error {
@@ -52,7 +52,7 @@ func TestSend(t *testing.T) {
 		{
 			name: "Error: IsQueueFull()",
 			client: &Client{
-				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+				sendRunner: func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 					return base.ErrQueueFull
 				},
 				notifier: make(chan NotifyError, 1),
@@ -63,7 +63,7 @@ func TestSend(t *testing.T) {
 		{
 			name: "Error: IsValidationErr()",
 			client: &Client{
-				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+				sendRunner: func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 					return base.ErrValidation
 				},
 			},
@@ -72,7 +72,7 @@ func TestSend(t *testing.T) {
 		{
 			name: "Error: error is uncategorized",
 			client: &Client{
-				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+				sendRunner: func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 					return errors.New("error")
 				},
 			},
@@ -81,7 +81,7 @@ func TestSend(t *testing.T) {
 		{
 			name: "Success",
 			client: &Client{
-				sendRunner: func(ctx context.Context, msg msgs.Msg) error {
+				sendRunner: func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 					return nil
 				},
 			},

@@ -149,8 +149,8 @@ type Client struct {
 type Settings struct {
 	// QueueSize is the maximum number of audit records that can be queued.
 	// Defaults to MaxQueueSize. This queue is the queue not only for sending records
-	// but Records that fail to send for any reason but validation and context timeouts
-	// will be requeued here. When this is full, the record is dropped.
+	// but Records that fail to send for any reason but validation. will be requeued here.
+	// When this is full, the record is dropped.
 	QueueSize int
 }
 
@@ -258,6 +258,42 @@ func (c *Client) Logger() *slog.Logger {
 	return c.log
 }
 
+type sendOptions struct {
+	timeout time.Duration
+}
+
+// SendOption is an option for the Send function.
+type SendOption func(sendOptions) (sendOptions, error)
+
+// WithTimeout sets the timeout for sending a message to the sending channel. If the timeout is <= 0 (the default),
+// a ErrQueueFull will be sent immediately if we can't send on the channel. Otherwise, we will block
+// until the timeout is reached. If the timeout is reached, a ErrQueueFull will be sent. This option is provided
+// instead of using a context because we want to avoid accidentally using a context that has a timeout set causing
+// the Send to block indefinitely (or enough to bring a service to a halt).
+func WithTimeout(timeout time.Duration) SendOption {
+	return func(o sendOptions) (sendOptions, error) {
+		if timeout < 0 {
+			timeout = 0
+		}
+		o.timeout = timeout
+		return o, nil
+	}
+}
+
+/*
+// Send sends a message to the remote audit server. If the connection is broken, it will attempt to reconnect
+// but you will not receive an error. The only errors that will be returned are due to the Record being
+// invalid, trying to send a Msg with a type not DataPlane/ControlPlane, when we receive an
+// uncategorized error (which always indicates a handling bug in the Client), if Close() has been
+// called or the queue is full (base.ErrQueueFull). This is an asyncronous client by default, meaning
+// that this will not block by default. If the queue is full, a base.ErrQueueFull is returned. It is up
+// to the caller do decide what to do. Context timeouts are not honored, however... WithTimeout can be used
+// to set a timeout for sending a message to the sending channel. This overrides the default behavior of
+// returning a base.ErrQueueFull immediately if the queue is full. If providing this option, the timeout
+// should be short to avoid a service outage while waiting for the queue to clear (the agent on the far
+// side could be broken). If the timeout is reached, a base.ErrQueueFull will be returned.
+*/
+
 /*
 Send sends an audit record to the audit server. Send is asynchronous and thread safe.
 
@@ -281,7 +317,7 @@ Send does not honor Context cancellation.
 Errors that are Unrecoverable or context cancelled will be sent to Recover(). It is up to the caller
 to either handle these errors or ignore them. If you ignore them, you will lose audit records.
 */
-func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
+func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) error {
 	if msg.Type == msgs.ATUnknown || msg.Type > msgs.ControlPlane {
 		return fmt.Errorf("audit type (%v) is invalid: %w", msg.Type, ErrValidation)
 	}
@@ -298,12 +334,31 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
 		}
 	}
 
-	// We always want to send the message unless the queue is full or the context times out
-	// before we get to send the message.
-	select {
-	case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
-	default:
-		return ErrQueueFull
+	opts := sendOptions{}
+	for _, o := range options {
+		var err error
+		opts, err = o(opts)
+		if err != nil {
+			return err
+		}
+	}
+
+	if opts.timeout > 0 {
+		timer := time.NewTimer(opts.timeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return ErrQueueFull
+		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
+		}
+	} else {
+		// We always want to send the message unless the queue is full or the context times out
+		// before we get to send the message.
+		select {
+		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
+		default:
+			return ErrQueueFull
+		}
 	}
 
 	// If we had any errors previously, we need to return them.
@@ -346,13 +401,18 @@ func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 
 // Close closes the connection to the audit server.
 func (c *Client) Close(ctx context.Context) error {
-	c.wait()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+	}
+	c.wait(ctx)
 	return c.close(ctx, true)
 }
 
 // wait waits for the client to finish sending all messages. This is determined by the queue
 // being empty.
-func (c *Client) wait() {
+func (c *Client) wait(ctx context.Context) {
 	doneWaiting := make(chan struct{})
 	go func() {
 		defer close(doneWaiting)
@@ -365,6 +425,9 @@ func (c *Client) wait() {
 	}()
 	for {
 		select {
+		case <-ctx.Done():
+			c.log.Info("timeout waiting for audit log base client to send all messages after a Close(), this normally happens because the agent was not listening")
+			return
 		case <-time.After(10 * time.Second):
 			c.log.Info("waiting for audit log base client to send all messages after a Close()")
 		case <-doneWaiting:
