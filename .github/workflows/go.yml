@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  schedule:
+    - cron: "0 14 * * 2"
+  workflow_dispatch: # This allows manual triggering of the workflow
 
 permissions:
   contents: read
