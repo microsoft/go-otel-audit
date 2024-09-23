@@ -149,7 +149,7 @@ type Client struct {
 type Settings struct {
 	// QueueSize is the maximum number of audit records that can be queued.
 	// Defaults to MaxQueueSize. This queue is the queue not only for sending records
-	// but Records that fail to send for any reason but validation. will be requeued here.
+	// but Records that fail to send for any reason but validation will be requeued here.
 	// When this is full, the record is dropped.
 	QueueSize int
 }
@@ -281,20 +281,6 @@ func WithTimeout(timeout time.Duration) SendOption {
 }
 
 /*
-// Send sends a message to the remote audit server. If the connection is broken, it will attempt to reconnect
-// but you will not receive an error. The only errors that will be returned are due to the Record being
-// invalid, trying to send a Msg with a type not DataPlane/ControlPlane, when we receive an
-// uncategorized error (which always indicates a handling bug in the Client), if Close() has been
-// called or the queue is full (base.ErrQueueFull). This is an asyncronous client by default, meaning
-// that this will not block by default. If the queue is full, a base.ErrQueueFull is returned. It is up
-// to the caller do decide what to do. Context timeouts are not honored, however... WithTimeout can be used
-// to set a timeout for sending a message to the sending channel. This overrides the default behavior of
-// returning a base.ErrQueueFull immediately if the queue is full. If providing this option, the timeout
-// should be short to avoid a service outage while waiting for the queue to clear (the agent on the far
-// side could be broken). If the timeout is reached, a base.ErrQueueFull will be returned.
-*/
-
-/*
 Send sends an audit record to the audit server. Send is asynchronous and thread safe.
 
 Send is designed around speed. It will return immediately if the queue is full or your message
@@ -312,9 +298,17 @@ that occur due to unrecoverable errors are put back into the  queue until that q
 Whenever a ErrQueueFull message occurs, the message being sent is dropped and you must deal with the message
 yourself.
 
-Send does not honor Context cancellation.
+The only errors that will be returned are due to the Record being invalid, trying to send a Msg with a type not DataPlane/ControlPlane, when we receive an
+uncategorized error (which always indicates a handling bug in the Client), if Close() has been
+called or the queue is full (base.ErrQueueFull).
 
-Errors that are Unrecoverable or context cancelled will be sent to Recover(). It is up to the caller
+Send does not honor Context cancellation. However... WithTimeout can be used to set a timeout for sending a
+message to the sending channel. This overrides the default behavior of returning a base.ErrQueueFull immediately
+if the queue is full. If providing this option, the timeout should be short to avoid a service outage while
+waiting for the queue to clear (the agent on the far side could be broken). If the timeout is reached,
+a base.ErrQueueFull will be returned.
+
+Errors that are Unrecoverable will be sent to Recover(). It is up to the caller
 to either handle these errors or ignore them. If you ignore them, you will lose audit records.
 */
 func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) error {

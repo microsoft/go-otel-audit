@@ -57,7 +57,7 @@ func TestSlowListeningMDSD(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	//defer c.Close(context.Background())
+	defer c.Close(context.Background())
 
 	go func() {
 		c, err := socket.Accept()
@@ -78,10 +78,6 @@ func TestSlowListeningMDSD(t *testing.T) {
 			log.Printf("msg(%d): %s}", i, err)
 		}
 	}
-
-	log.Println("Done")
-
-	time.Sleep(2 * time.Second)
 }
 
 func TestNonExistingSocket(t *testing.T) {
