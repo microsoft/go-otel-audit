@@ -281,6 +281,32 @@ func TestSend(t *testing.T) {
 	}
 }
 
+func TestSendWithTimeout(t *testing.T) {
+	t.Parallel()
+
+	msg := msgs.Msg{
+		Type:   msgs.DataPlane,
+		Record: validRecord.Clone(),
+	}
+	client := &Client{}
+
+	// Fill the send queue.
+	client.sendCh = make(chan SendMsg, 1)
+	client.sendCh <- SendMsg{Ctx: context.Background(), Msg: msg}
+
+	// Pull off a message after a second.
+	go func() {
+		time.Sleep(1 * time.Second)
+		<-client.sendCh
+	}()
+
+	// Call the Send() method with the specified record and context.
+	err := client.Send(context.Background(), msg, WithTimeout(3*time.Second))
+	if err != nil {
+		t.Errorf("Expected no error, but got error: %v", err)
+	}
+}
+
 func TestReset(t *testing.T) {
 	t.Parallel()
 

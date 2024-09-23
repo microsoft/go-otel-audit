@@ -94,8 +94,8 @@ type Client struct {
 	// In production, this uses .replaceBackoff. In testing this can be replaced with a function that does nothing.
 	replaceBackoffRunner func(ctx context.Context) error
 	// sendRunner is a function that sends a message to the remote audit server.
-	// In production, this uses .client.Sent(). In testing this can be replaced with a function that does nothing.
-	sendRunner func(ctx context.Context, msg msgs.Msg) error
+	// In production, this uses .client.Send(). In testing this can be replaced with a function that does nothing.
+	sendRunner func(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error
 
 	closed atomic.Bool
 }
@@ -185,12 +185,12 @@ func (c *Client) Notify() <-chan NotifyError {
 // invalid, trying to send a Msg with a type not DataPlane/ControlPlane, when we receive an
 // uncategorized error (which always indicates a handling bug in the Client) or if Close() has been
 // called. Context timeouts are not honored.
-func (c *Client) Send(ctx context.Context, msg msgs.Msg) error {
+func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...base.SendOption) error {
 	if c.closed.Load() {
 		return fmt.Errorf("audit: client is closed")
 	}
 
-	if err := c.sendRunner(ctx, msg); err != nil {
+	if err := c.sendRunner(ctx, msg, options...); err != nil {
 		if base.IsUnrecoverable(err) {
 			c.replaceBackoffRunner(ctx) // Dropping error on purpose
 			return nil

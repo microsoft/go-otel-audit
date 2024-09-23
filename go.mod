@@ -6,6 +6,8 @@ toolchain go1.22.4
 
 require (
 	github.com/go-json-experiment/json v0.0.0-20240418180308-af2d5061e6c2
+	github.com/google/uuid v1.6.0
+	github.com/gostdlib/concurrency v0.0.0-20240403195145-a5b82e576be2
 	github.com/kylelemons/godebug v1.1.0
 	github.com/stretchr/testify v1.8.4
 	github.com/vmihailenco/msgpack/v4 v4.3.13
@@ -14,10 +16,13 @@ require (
 )
 
 require (
+	github.com/gostdlib/internals v0.0.0-20240319155855-57c259c0554f // indirect
 	github.com/jedib0t/go-pretty/v6 v6.5.6 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sanity-io/litter v1.5.5 // indirect
+	go.opentelemetry.io/otel v1.24.0 // indirect
+	go.opentelemetry.io/otel/trace v1.24.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
 
