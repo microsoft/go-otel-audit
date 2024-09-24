@@ -115,9 +115,6 @@ type Client struct {
 	// This is so that we can start the heartbeat only once a successful message has been sent.
 	successSend bool
 
-	// done is closed when the internal sender goroutine is done.
-	done chan struct{}
-
 	// This next section represents our error handling. We use an atomic.Value to store the error
 	// so that we can read it without a lock. We use a lock to write to the error. This is because
 	// we want to ensure that the connection is only closed once. Reads of err are fast, setting an
@@ -195,7 +192,6 @@ func New(c conn.Audit, options ...Option) (client *Client, err error) {
 		settings:          Settings{}.defaults(),
 		log:               slog.Default(),
 		heartbeatInterval: 30 * time.Minute,
-		done:              make(chan struct{}),
 	}
 	cli.conn.Store(&c)
 
@@ -382,9 +378,6 @@ func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 	c.close(ctx, false)
 	c.conn.Store(&newConn)
 
-	// Now let's bring everything back to life.
-	c.done = make(chan struct{})
-
 	c.closeOnceMu.Lock()
 	c.closeOnce = sync.Once{}
 	c.closeOnceMu.Unlock()
@@ -467,8 +460,6 @@ func (c *Client) close(ctx context.Context, stopSender bool) error {
 
 // sender is the async sender for the audit client.
 func (c *Client) sender() {
-	defer close(c.done)
-
 	var ticker *time.Ticker
 	defer func() {
 		if ticker != nil {
