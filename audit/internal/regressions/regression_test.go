@@ -16,6 +16,9 @@ import (
 	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
+// TestNonListeningMDSDCausesCloseToBlockForever was a bug found where Close() never closed due to waiting for the queue
+// to empty. If the listener isn't working, this never happens.
+// This test takes some time (around 20 seconds), because it has to hit a timeout that isn't worth faking.
 func TestNonListeningMDSDCausesCloseToBlockForever(t *testing.T) {
 	t.Parallel()
 
