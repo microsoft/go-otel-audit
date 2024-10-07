@@ -2,9 +2,9 @@ name: Go
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
   schedule:
     - cron: "0 14 * * 2"
   workflow_dispatch: # This allows manual triggering of the workflow
@@ -30,7 +30,7 @@ jobs:
           go-version: 1.22.4
 
       - name: Build
-        run: go build -v .
+        run: go build -v ./...
 
       - name: Test
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
