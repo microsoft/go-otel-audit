@@ -252,10 +252,7 @@ func TestSend(t *testing.T) {
 			test.ctx = context.Background()
 		}
 
-		m := &metrics{}
-		m.init()
-
-		client := &Client{metrics: m}
+		client := &Client{metrics: newMetrics()}
 		client.sendCh = test.sendCh
 
 		// Note: for the QueueFull test, we need to fill the send channel to force the select
@@ -292,9 +289,7 @@ func TestSendWithTimeout(t *testing.T) {
 		Type:   msgs.DataPlane,
 		Record: validRecord.Clone(),
 	}
-	m := &metrics{}
-	m.init()
-	client := &Client{metrics: m}
+	client := &Client{metrics: newMetrics()}
 
 	// Fill the send queue.
 	client.sendCh = make(chan SendMsg, 1)
@@ -335,18 +330,16 @@ func TestReset(t *testing.T) {
 		newConn conn.Audit
 		err     bool
 	}{
-		/*
-			{
-				name:    "Nil client",
-				newConn: conn.NewNoOP(),
-				err:     true,
-			},
-			{
-				name:   "Nil connection",
-				client: must(),
-				err:    true,
-			},
-		*/
+		{
+			name:    "Nil client",
+			newConn: conn.NewNoOP(),
+			err:     true,
+		},
+		{
+			name:   "Nil connection",
+			client: must(),
+			err:    true,
+		},
 		{
 			name:    "Valid reset",
 			client:  must(),

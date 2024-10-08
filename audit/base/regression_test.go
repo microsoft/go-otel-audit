@@ -18,19 +18,20 @@ func (b *badConn) Write(context.Context, msgs.Msg) error {
 	return errors.New("error")
 }
 
+func (b *badConn) CloseSend(ctx context.Context) error {
+	return nil
+}
+
 // https://github.com/microsoft/go-otel-audit/issues/15
 // Basically, this is when we have more buffer than issues coming in, the far side stops
 // processing the messages and we requeue them until the buffer is full, which never occurs.
 func TestTimeoutCausesRetryLoop(t *testing.T) {
 	t.Parallel()
 
-	m := &metrics{}
-	m.init()
-
 	c := &Client{
 		stopSend: make(chan chan struct{}),
 		sendCh:   make(chan SendMsg, 1),
-		metrics:  m,
+		metrics:  newMetrics(),
 	}
 	var i conn.Audit = &badConn{}
 	c.conn.Store(&i)

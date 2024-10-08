@@ -113,12 +113,15 @@ type metrics struct {
 	requeuedCounter atomic.Uint64
 }
 
-func (m *metrics) init() {
-	m.meter = otel.GetMeterProvider().Meter("github.com/microsoft/go-otel-audit/audit/base")
+func newMetrics() *metrics {
+	m := &metrics{
+		meter: otel.GetMeterProvider().Meter("github.com/microsoft/go-otel-audit/audit/base"),
+	}
 	m.msgsSent, _ = m.meter.Int64Counter("messages_sent")
-	m.msgsRequeued, _ = m.meter.Int64Counter("messages_requeed")
+	m.msgsRequeued, _ = m.meter.Int64Counter("messages_requeued")
 	m.msgsDropped, _ = m.meter.Int64Counter("messages_dropped")
 	m.msgErrs, _ = m.meter.Int64Counter("messages_errors")
+	return m
 }
 
 // Client represents a client connection to an audit server.
@@ -213,14 +216,11 @@ func New(c conn.Audit, options ...Option) (client *Client, err error) {
 		return nil, fmt.Errorf("cannot pass a conn.Audit that is nil: %w", ErrConnection)
 	}
 
-	m := &metrics{}
-	m.init()
-
 	cli := &Client{
 		settings:          Settings{}.defaults(),
 		log:               slog.Default(),
 		heartbeatInterval: 30 * time.Minute,
-		metrics:           m,
+		metrics:           newMetrics(),
 	}
 	cli.conn.Store(&c)
 
@@ -571,7 +571,8 @@ func (c *Client) msgRequeueOrDrop(ctx context.Context, msg msgs.Msg, err error) 
 }
 
 // setErr sets the error for the client if the error is not already set. If the error being set it nil,
-// it will be set to nil.
+// it will be set to nil. This should only be used for fatal errors to the client that are going to kill
+// the conn object (which this does).
 func (c *Client) setErr(err error) {
 	c.setErrMu.Lock()
 	defer c.setErrMu.Unlock()
@@ -585,6 +586,11 @@ func (c *Client) setErr(err error) {
 	// If there already is an error, we don't need to overwrite it.
 	if c.err.Load() != nil {
 		return
+	}
+
+	conn := c.conn.Load()
+	if conn != nil && *conn != nil {
+		(*conn).CloseSend(ctxBack) // Ignore any error
 	}
 
 	// This sets the conn to nil. This prevents any further writes to the connection until it gets replaced.
