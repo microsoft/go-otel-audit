@@ -63,6 +63,9 @@ import (
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/internal/version"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // ctxBack is used as a background context when we cannot use a context passed
@@ -96,6 +99,29 @@ func IsUnrecoverable(err error) bool {
 		return true
 	}
 	return false
+}
+
+type metrics struct {
+	meter        metric.Meter
+	msgsSent     metric.Int64Counter
+	msgsRequeued metric.Int64Counter
+	msgsDropped  metric.Int64Counter
+	msgErrs      metric.Int64Counter
+
+	// requeuedCounter exists to track the number of requeued messages in a test.
+	// You cannot extract the value from an otel counter.
+	requeuedCounter atomic.Uint64
+}
+
+func newMetrics() *metrics {
+	m := &metrics{
+		meter: otel.GetMeterProvider().Meter("github.com/microsoft/go-otel-audit/audit/base"),
+	}
+	m.msgsSent, _ = m.meter.Int64Counter("messages_sent")
+	m.msgsRequeued, _ = m.meter.Int64Counter("messages_requeued")
+	m.msgsDropped, _ = m.meter.Int64Counter("messages_dropped")
+	m.msgErrs, _ = m.meter.Int64Counter("messages_errors")
+	return m
 }
 
 // Client represents a client connection to an audit server.
@@ -138,6 +164,8 @@ type Client struct {
 	// heartbeatInterval is the interval for sending heartbeats. A value of
 	// 0 means no heartbeats are sent.
 	heartbeatInterval time.Duration
+
+	metrics *metrics
 }
 
 // Settings represents the settings for the audit client. These are used to configure how the
@@ -192,6 +220,7 @@ func New(c conn.Audit, options ...Option) (client *Client, err error) {
 		settings:          Settings{}.defaults(),
 		log:               slog.Default(),
 		heartbeatInterval: 30 * time.Minute,
+		metrics:           newMetrics(),
 	}
 	cli.conn.Store(&c)
 
@@ -338,6 +367,9 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) 
 		defer timer.Stop()
 		select {
 		case <-timer.C:
+			if c.conn.Load() == nil {
+				return ErrConnection
+			}
 			return ErrQueueFull
 		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
 		}
@@ -347,6 +379,9 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) 
 		select {
 		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
 		default:
+			if c.conn.Load() == nil {
+				return ErrConnection
+			}
 			return ErrQueueFull
 		}
 	}
@@ -373,7 +408,6 @@ func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 	// If for some reason there is no error happening, we need to set one to prevents sends.
 
 	c.setErr(fmt.Errorf("audit client Reset() called, resetting connection: %w", ErrConnection))
-
 	// If the connection is live, we need to close it.
 	c.close(ctx, false)
 	c.conn.Store(&newConn)
@@ -470,38 +504,48 @@ func (c *Client) sender() {
 	var tickerCh <-chan time.Time
 
 	for {
+		// If the connection is nil, we need to wait for it to be set and not
+		// drain the message queue.
+		conn := c.conn.Load()
+		if conn == nil {
+			time.Sleep(1 * time.Second)
+			select {
+			case sig := <-c.stopSend:
+				// Let the other side know we are done.
+				sig <- struct{}{}
+				return
+			default:
+			}
+			continue
+		}
+
+		// This happens after we send the first message before we start the ticker.
 		if c.successSend && ticker == nil {
-			c.write(ctxBack, c.heartbeat)
+			c.write(ctxBack, c.heartbeat, conn)
 			ticker = time.NewTicker(c.heartbeatInterval)
 			tickerCh = ticker.C
 		}
 
+		// The connection is fine, we can send messages.
 		select {
 		case sig := <-c.stopSend:
 			// Let the other side know we are done.
 			sig <- struct{}{}
 			return
 		case sm := <-c.sendCh:
-			c.write(sm.Ctx, sm.Msg)
+			c.write(sm.Ctx, sm.Msg, conn)
 		case <-tickerCh:
-			c.write(ctxBack, c.heartbeat)
+			c.write(ctxBack, c.heartbeat, conn)
 		}
 	}
 }
 
-func (c *Client) write(ctx context.Context, msg msgs.Msg) {
-	ptr := c.conn.Load()
-	if ptr == nil {
-		return
-	}
-
-	if err := (*ptr).Write(ctx, msg); err != nil {
-		// Requeue the message if we can.
-		select {
-		case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
-		default:
-			c.log.Error(fmt.Sprintf("audit message dropped due to queue being full: %v", err))
-		}
+// write writes the message to the audit server. If the write fails, the message is requeued if there
+// is room. If there is no room, the message is dropped. Dropped messages are noted in logs.
+func (c *Client) write(ctx context.Context, msg msgs.Msg, conn *conn.Audit) {
+	if err := (*conn).Write(ctx, msg); err != nil {
+		c.metrics.msgErrs.Add(ctx, 1)
+		c.msgRequeueOrDrop(ctx, msg, err)
 
 		if err == context.Canceled {
 			c.log.Error(fmt.Sprintf("audit message had context cancellation: %s", err))
@@ -510,22 +554,47 @@ func (c *Client) write(ctx context.Context, msg msgs.Msg) {
 		c.setErr(fmt.Errorf("%w: %w", err, ErrConnection))
 		return
 	}
+	c.metrics.msgsSent.Add(ctx, 1)
 	c.successSend = true
 }
 
+// msgRequeueOrDrop requeues the message if there is room in the queue. If there is no room, the message is dropped.
+func (c *Client) msgRequeueOrDrop(ctx context.Context, msg msgs.Msg, err error) {
+	select {
+	case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
+		c.metrics.requeuedCounter.Add(1)
+		c.metrics.msgsRequeued.Add(ctx, 1)
+	default:
+		c.metrics.msgsDropped.Add(ctx, 1)
+		c.log.Error(fmt.Sprintf("audit message dropped due to queue being full: %v", err))
+	}
+}
+
 // setErr sets the error for the client if the error is not already set. If the error being set it nil,
-// it will be set to nil.
+// it will be set to nil. This should only be used for fatal errors to the client that are going to kill
+// the conn object (which this does).
 func (c *Client) setErr(err error) {
 	c.setErrMu.Lock()
 	defer c.setErrMu.Unlock()
 
+	// This resets the error if the error passed is nil.
 	if err == nil {
 		c.err.Store(nil)
+		return
 	}
 
+	// If there already is an error, we don't need to overwrite it.
 	if c.err.Load() != nil {
 		return
 	}
+
+	conn := c.conn.Load()
+	if conn != nil && *conn != nil {
+		(*conn).CloseSend(ctxBack) // Ignore any error
+	}
+
+	// This sets the conn to nil. This prevents any further writes to the connection until it gets replaced.
+	c.conn.Store(nil)
 
 	c.err.Store(&err)
 }

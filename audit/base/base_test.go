@@ -251,7 +251,8 @@ func TestSend(t *testing.T) {
 		if test.ctx == nil {
 			test.ctx = context.Background()
 		}
-		client := &Client{}
+
+		client := &Client{metrics: newMetrics()}
 		client.sendCh = test.sendCh
 
 		// Note: for the QueueFull test, we need to fill the send channel to force the select
@@ -288,7 +289,7 @@ func TestSendWithTimeout(t *testing.T) {
 		Type:   msgs.DataPlane,
 		Record: validRecord.Clone(),
 	}
-	client := &Client{}
+	client := &Client{metrics: newMetrics()}
 
 	// Fill the send queue.
 	client.sendCh = make(chan SendMsg, 1)
@@ -349,15 +350,21 @@ func TestReset(t *testing.T) {
 	for _, test := range tests {
 		ctx := context.Background()
 		err := test.client.Reset(ctx, test.newConn)
+		defer func() {
+			if test.client != nil {
+				test.client.Close(ctx)
+			}
+		}()
 		switch {
 		case test.err && err == nil:
 			t.Errorf("Expected error, but got no error")
+			continue
 		case !test.err && err != nil:
 			t.Errorf("Expected no error, but got error: %v", err)
+			continue
 		case err != nil:
-			return
+			continue
 		}
-		defer test.client.Close(ctx)
 
 		// Critical to make sure next part works.
 		if cap(test.client.sendCh) != 1 {
