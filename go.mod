@@ -1,8 +1,7 @@
 module github.com/microsoft/go-otel-audit
 
 go 1.22.1
-
-toolchain go1.22.4
+toolchain go1.23.7
 
 require (
 	github.com/go-json-experiment/json v0.0.0-20240418180308-af2d5061e6c2
@@ -14,7 +13,7 @@ require (
 	go.opentelemetry.io/otel v1.24.0
 	go.opentelemetry.io/otel/metric v1.24.0
 	golang.org/x/exp v0.0.0-20240416160154-fe59bbe5cc7f
-	golang.org/x/sys v0.23.0
+	golang.org/x/sys v0.30.0
 )
 
 require (
@@ -35,7 +34,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/vmihailenco/tagparser v0.1.1 // indirect
-	golang.org/x/net v0.28.0 // indirect
+	golang.org/x/net v0.36.0 // indirect
 	google.golang.org/appengine v1.6.5 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
