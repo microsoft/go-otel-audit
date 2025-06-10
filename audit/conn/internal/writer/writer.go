@@ -30,7 +30,11 @@ func New(conn net.Conn) *Conn {
 // Write writes a message to the remote audit server. Setting a timeout
 // on the context will set the write deadline.
 func (c *Conn) Write(ctx context.Context, msg msgs.Msg) error {
-	c.conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	deadline := c.now().Add(15 * time.Second)
+	if d, ok := ctx.Deadline(); ok {
+		deadline = d
+	}
+	c.conn.SetWriteDeadline(deadline)
 
 	var b []byte
 	var err error
