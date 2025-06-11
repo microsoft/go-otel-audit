@@ -334,7 +334,8 @@ func TypeMarshalUnmarshalJSON[T ~uint16](t *testing.T, length int) {
 
 		// Unmarshal
 		var got T
-		mt := any((&got)).(json.UnmarshalerV1)
+
+		mt := any((&got)).(json.Unmarshaler)
 
 		err = mt.UnmarshalJSON(data)
 		if err != nil {
