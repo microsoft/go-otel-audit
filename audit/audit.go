@@ -44,7 +44,6 @@ Example using the domainsocket package:
 package audit
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -53,6 +52,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gostdlib/base/context"
 	"github.com/microsoft/go-otel-audit/audit/base"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
