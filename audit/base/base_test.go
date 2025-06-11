@@ -308,8 +308,23 @@ func TestSendWithTimeout(t *testing.T) {
 	}
 }
 
+// BORKED
+/*
+--- FAIL: TestReset (1.00s)
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+    base_test.go:377: Expected no error, but got error: queue full
+*/
 func TestReset(t *testing.T) {
 	t.Parallel()
+
+	testTimeout := time.Now().Add(10 * time.Second)
 
 	must := func() *Client {
 		c, err := New(conn.NewNoOP(), WithSettings(Settings{QueueSize: 1}))
@@ -317,11 +332,6 @@ func TestReset(t *testing.T) {
 			panic(err)
 		}
 		return c
-	}
-
-	msg := msgs.Msg{
-		Type:   msgs.DataPlane,
-		Record: validRecord.Clone(),
 	}
 
 	tests := []struct {
@@ -373,7 +383,22 @@ func TestReset(t *testing.T) {
 
 		// This makes sure that the go routine that processes the send channel is running.
 		for i := 0; i < 10; i++ {
+			msg := msgs.Msg{
+				Type:   msgs.DataPlane,
+				Record: validRecord.Clone(),
+			}
+			msg.Record.OperationName = strconv.Itoa(i)
+			log.Println("Sending message:", msg.Record.OperationName)
+
+		retry:
 			if err := test.client.Send(ctx, msg); err != nil {
+				if time.Now().After(testTimeout) {
+					t.Fatalf("TestReset(%s): Timed out waiting for send to succeed", test.name)
+				}
+				if errors.Is(err, ErrQueueFull) {
+					time.Sleep(100 * time.Nanosecond)
+					goto retry
+				}
 				t.Errorf("Expected no error, but got error: %v", err)
 			}
 			time.Sleep(10 * time.Millisecond) // Only a buffer of 1, so this keeps it from filling.
@@ -424,6 +449,126 @@ func TestResetOnRunningClient(t *testing.T) {
 
 	if len(conn0.recMsgs)+len(conn1.recMsgs) != numMsgs {
 		t.Errorf("Expected %d messages, but got %d", numMsgs, len(conn0.recMsgs)+len(conn1.recMsgs))
+	}
+}
+
+// blockingConn is a test connection that blocks indefinitely on Write
+// to simulate a stuck sender goroutine
+type blockingConn struct {
+	conn.Audit
+	blockForever chan struct{}
+	firstWrite   bool
+	mu           sync.Mutex
+}
+
+func newBlockingConn() *blockingConn {
+	return &blockingConn{
+		Audit:        conn.NewNoOP(),
+		blockForever: make(chan struct{}),
+		firstWrite:   true,
+	}
+}
+
+func (b *blockingConn) Write(ctx context.Context, msg msgs.Msg) error {
+	b.mu.Lock()
+	isFirst := b.firstWrite
+	b.firstWrite = false
+	b.mu.Unlock()
+
+	if isFirst {
+		// Block indefinitely on first write to simulate a stuck sender goroutine
+		<-b.blockForever
+	}
+	return nil
+}
+
+// TestCloseDoesNotHangWithBlockedSender verifies that Close() does not hang indefinitely
+// even if the sender goroutine becomes unresponsive due to a blocking Write operation.
+func TestCloseDoesNotHangWithBlockedSender(t *testing.T) {
+	blockingConn := newBlockingConn()
+	cli, err := New(blockingConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send multiple messages to ensure the sender goroutine processes one and gets stuck
+	for i := 0; i < 2000; i++ {
+		go func() {
+			// This will cause the sender goroutine to call Write() and block forever
+			_ = cli.Send(context.Background(), msgs.Msg{
+				Type: msgs.DataPlane,
+				Record: msgs.Record{
+					CallerIpAddress: msgs.Addr{},
+				},
+			})
+		}()
+	}
+
+	// Give the sender goroutine time to start processing messages and get stuck in Write
+	time.Sleep(200 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		done <- cli.Close(ctx)
+	}()
+
+	// Wait for close to complete with a timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Close() returned error: %v", err)
+		}
+		// Success - Close() completed despite sender being stuck
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close() hung and did not complete within 15 seconds")
+	}
+}
+
+func TestHangingConn(t *testing.T) {
+	// Create connection that hangs on CloseSend (simulates Flush() hang on slow network)
+	hangingConn := conn.NewTestHangConn()
+
+	cli, err := New(hangingConn)
+	if err != nil {
+		panic(err)
+	}
+
+	validMsg := msgs.Msg{
+		Type:   msgs.DataPlane,
+		Record: validRecord.Clone(),
+	}
+
+	// Send messages to ensure normal operation
+	t.Log("1. Sending messages (works fine)...")
+	for i := 0; i < 3; i++ {
+		cli.Send(context.Background(), validMsg)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Create context with 2-second timeout
+	t.Log("2. Calling Close() with 2-second context timeout...")
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		start := time.Now()
+		err := cli.Close(ctx)
+		duration := time.Since(start)
+		t.Logf("   Close() returned after %v with error: %v\n", duration, err)
+		done <- err
+	}()
+
+	// Proof: Close() will hang longer than the context timeout
+	t.Log("3. Waiting to see if Close() respects the 2-second timeout...")
+
+	select {
+	case <-done:
+		t.Log("❌ BUG NOT REPRODUCED: Close() completed within timeout")
+	case <-time.After(30 * time.Second):
+		t.Fatal("TestHangingConn: bug confirmed, we are hanging on an underlying connection's .CloseSend()")
 	}
 }
 

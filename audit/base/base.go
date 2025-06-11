@@ -50,9 +50,9 @@ You can adjust the settings for the audit client by using the WithSettings() opt
 package base
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"runtime"
 	"strings"
@@ -60,6 +60,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gostdlib/base/context"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/internal/version"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
@@ -226,7 +227,9 @@ func New(c conn.Audit, options ...Option) (client *Client, err error) {
 
 	defer func() {
 		if err != nil {
-			c.CloseSend(ctxBack)
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+			cli.closeSend(ctx)
 		}
 	}()
 
@@ -406,8 +409,9 @@ func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 	}
 
 	// If for some reason there is no error happening, we need to set one to prevents sends.
-
+	// If an error is already set, this will not overwrite it.
 	c.setErr(fmt.Errorf("audit client Reset() called, resetting connection: %w", ErrConnection))
+
 	// If the connection is live, we need to close it.
 	c.close(ctx, false)
 	c.conn.Store(&newConn)
@@ -420,7 +424,9 @@ func (c *Client) Reset(ctx context.Context, newConn conn.Audit) error {
 	return nil
 }
 
-// Close closes the connection to the audit server.
+// Close closes the connection to the audit server. If no context.Deadline is set,
+// it will use a default timeout of 20 seconds. The timeout may take slightly longer than
+// the setting due to multiple operation closures that must happen in order.
 func (c *Client) Close(ctx context.Context) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -432,7 +438,7 @@ func (c *Client) Close(ctx context.Context) error {
 }
 
 // wait waits for the client to finish sending all messages. This is determined by the queue
-// being empty.
+// being empty. This will only wait up to 10 seconds or until the context is done, whichever comes first.
 func (c *Client) wait(ctx context.Context) {
 	doneWaiting := make(chan struct{})
 	go func() {
@@ -447,10 +453,10 @@ func (c *Client) wait(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			c.log.Info("timeout waiting for audit log base client to send all messages after a Close(), this normally happens because the agent was not listening")
+			c.log.Error("context timeout waiting for audit log base client to send all messages after a Close(), this normally happens because the agent was not listening")
 			return
 		case <-time.After(10 * time.Second):
-			c.log.Info("waiting for audit log base client to send all messages after a Close()")
+			c.log.Error("default timeout(10 seconds) waiting for audit log base client to send all messages after a Close()")
 		case <-doneWaiting:
 			return
 		}
@@ -465,31 +471,61 @@ func (c *Client) close(ctx context.Context, stopSender bool) error {
 
 	c.closeOnce.Do(func() {
 		if stopSender {
+			log.Println("stopping sender for audit client")
 			// This might be new to some of you, but you can send a channel over a channel.
 			// In this case, I create a channel and send it on the stopSend channel. When the
 			// sender receives the channel, it will close the channel I sent, and then we know that
 			// the sender is done.
 			sig := make(chan struct{}, 1)
-			c.stopSend <- sig
-			<-sig
-		}
-
-		if err := c.getErr(); err != nil {
-			ptr := c.conn.Load()
-			if ptr != nil {
-				(*ptr).CloseSend(ctx) // Ignore any error
+			select {
+			case c.stopSend <- sig:
+				select {
+				case <-time.After(2 * time.Second):
+					log.Println("sender for audit client did not stop in time, continuing to close")
+				case <-sig:
+					log.Println("sender for audit client stopped")
+				}
+			default:
+				// If the stopSend channel is full, we don't want to block here.
 			}
-			return
-		}
 
-		ptr := c.conn.Load()
-		if ptr != nil {
-			if err := (*ptr).CloseSend(ctx); err != nil {
-				c.setErr(fmt.Errorf("%w: %w", err, ErrConnection))
-			}
 		}
+		c.closeSend(ctx)
 	})
 	return c.getErr()
+}
+
+// closeSend closes the underlying connection's send channel. This handles a case where the .CloseSend() could possibly hang
+// because the underlying connection's .CloseSend() block's forever.
+func (c *Client) closeSend(ctx context.Context) {
+	log.Println("inside closeSend()")
+	defer log.Println("exiting closeSend()")
+
+	ptr := c.conn.Load()
+	if ptr == nil {
+		return
+	}
+	conn := *ptr
+	// This sets the conn to nil. This prevents any further writes to the connection until it gets replaced.
+	c.conn.Store(nil)
+
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+
+	done := make(chan error, 1)
+	_ = context.Pool(ctx).Submit(ctx, func() { done <- conn.CloseSend(ctx) })
+
+	select {
+	case <-ctx.Done():
+		c.setErr(fmt.Errorf("base.Close() had a timeout on closing the underlying connection via .CloseSend: %w", ctx.Err()))
+	case err := <-done:
+		if err != nil {
+			c.setErr(err)
+		}
+	}
 }
 
 // sender is the async sender for the audit client.
@@ -508,11 +544,13 @@ func (c *Client) sender() {
 		// drain the message queue.
 		conn := c.conn.Load()
 		if conn == nil {
+			log.Println("waiting for new connection to be set")
 			time.Sleep(1 * time.Second)
 			select {
 			case sig := <-c.stopSend:
 				// Let the other side know we are done.
 				sig <- struct{}{}
+				log.Println("stopping sender for audit client")
 				return
 			default:
 			}
@@ -521,6 +559,7 @@ func (c *Client) sender() {
 
 		// This happens after we send the first message before we start the ticker.
 		if c.successSend && ticker == nil {
+			log.Println("writing new heartbeat message")
 			c.write(ctxBack, c.heartbeat, conn)
 			ticker = time.NewTicker(c.heartbeatInterval)
 			tickerCh = ticker.C
@@ -531,9 +570,13 @@ func (c *Client) sender() {
 		case sig := <-c.stopSend:
 			// Let the other side know we are done.
 			sig <- struct{}{}
+			log.Println("stopping sender for audit client")
 			return
+		// Send message.
 		case sm := <-c.sendCh:
+			log.Println("attempting to send message: ", sm.Msg.Record.OperationName)
 			c.write(sm.Ctx, sm.Msg, conn)
+		// Send heartbeat if we have one and the ticker is set.
 		case <-tickerCh:
 			c.write(ctxBack, c.heartbeat, conn)
 		}
@@ -562,9 +605,11 @@ func (c *Client) write(ctx context.Context, msg msgs.Msg, conn *conn.Audit) {
 func (c *Client) msgRequeueOrDrop(ctx context.Context, msg msgs.Msg, err error) {
 	select {
 	case c.sendCh <- SendMsg{Ctx: ctx, Msg: msg}:
+		log.Println("I requeued")
 		c.metrics.requeuedCounter.Add(1)
 		c.metrics.msgsRequeued.Add(ctx, 1)
 	default:
+		log.Println("i did not requeue")
 		c.metrics.msgsDropped.Add(ctx, 1)
 		c.log.Error(fmt.Sprintf("audit message dropped due to queue being full: %v", err))
 	}
@@ -588,10 +633,7 @@ func (c *Client) setErr(err error) {
 		return
 	}
 
-	conn := c.conn.Load()
-	if conn != nil && *conn != nil {
-		(*conn).CloseSend(ctxBack) // Ignore any error
-	}
+	c.closeSend(ctxBack)
 
 	// This sets the conn to nil. This prevents any further writes to the connection until it gets replaced.
 	c.conn.Store(nil)

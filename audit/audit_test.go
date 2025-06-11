@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -335,15 +336,14 @@ var validRecord = msgs.Record{
 
 // TestResetHappensOnClient is a practical test that shows that the client handles calling base.Client.Reset()
 // when an unrecoverable error is returned from base.Client.Send().
+// NOTE: Flakey! This occassionally drops the message that causes the reset, but I am unsure why. The act of doing any logging
+// seems to cause this test to pass by altering timing (sigh). It is not critical that a message is not dropped, as this is
+// usually a case of a connection lost or misbehaving agent. In the future I plan to fix this with simplification of the how audit
+// and base clients interact.
 func TestResetHappensOnClient(t *testing.T) {
 	t.Parallel()
 
 	numMsgs := 100000
-
-	msg := msgs.Msg{
-		Type:   msgs.DataPlane,
-		Record: validRecord.Clone(),
-	}
 
 	conn0 := &auditMsgCollector{errAfter: 1000}
 	conn1 := &auditMsgCollector{}
@@ -364,6 +364,11 @@ func TestResetHappensOnClient(t *testing.T) {
 
 	for i := 0; i < numMsgs; i++ {
 	tryAgain:
+		msg := msgs.Msg{
+			Type:   msgs.DataPlane,
+			Record: validRecord.Clone(),
+		}
+		msg.Record.OperationName = strconv.Itoa(i)
 		if err := client.Send(context.Background(), msg); err != nil {
 			if errors.Is(err, base.ErrQueueFull) {
 				time.Sleep(100 * time.Millisecond)
@@ -375,5 +380,8 @@ func TestResetHappensOnClient(t *testing.T) {
 
 	if len(conn0.recMsgs)+len(conn1.recMsgs) != numMsgs {
 		t.Errorf("Expected %d messages, but got %d", numMsgs, len(conn0.recMsgs)+len(conn1.recMsgs))
+		t.Log("conn0 messages:", len(conn0.recMsgs), "conn1 messages:", len(conn1.recMsgs))
+		t.Log("conn0 last message: ", conn0.recMsgs[len(conn0.recMsgs)-1].Record.OperationName)
+		t.Log("conn1 first message: ", conn1.recMsgs[0].Record.OperationName)
 	}
 }
