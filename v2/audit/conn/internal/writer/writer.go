@@ -6,8 +6,12 @@ import (
 	"net"
 	"time"
 
+	"github.com/gostdlib/base/context"
 	"github.com/microsoft/go-otel-audit/v2/audit/msgs"
 )
+
+// ClosePool is a goroutine pool for closing connections to a remote audit server.
+var ClosePool = context.Pool(context.Background()).Sub(context.Background(), "conn.TCPConn.Close")
 
 type now func() time.Time
 
@@ -22,12 +26,13 @@ type Option func(c *Conn) error
 
 // New creates a new connection to the remote audit server.
 func New(conn net.Conn, options ...Option) (*Conn, error) {
+	c := &Conn{conn: conn, now: time.Now}
 	for _, o := range options {
-		if err := o(&Conn{conn: conn, now: time.Now}); err != nil {
+		if err := o(c); err != nil {
 			return nil, err
 		}
 	}
-	return &Conn{conn: conn, now: time.Now}, nil
+	return c, nil
 }
 
 // Write writes a message to the remote audit server. Setting a timeout
@@ -48,5 +53,11 @@ func (c *Conn) Write(msg msgs.Msg) error {
 
 // CloseSend closes the send channel to the remote audit server.
 func (c *Conn) CloseSend() error {
-	return c.conn.Close()
+	ClosePool.Submit(
+		context.Background(),
+		func() {
+			_ = c.conn.Close() // We don't care about an error here.
+		},
+	)
+	return nil
 }

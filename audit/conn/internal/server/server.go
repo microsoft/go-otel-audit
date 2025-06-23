@@ -101,6 +101,7 @@ func (c *AuditRecordTest) MsgCh() <-chan msgs.Record {
 
 // Close closes the server.
 func (c *AuditRecordTest) Close() error {
+	log.Println("Closing server")
 	return c.l.Close()
 }
 

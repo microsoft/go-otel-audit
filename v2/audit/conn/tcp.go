@@ -3,6 +3,7 @@
 package conn
 
 import (
+	"fmt"
 	"net"
 
 	"github.com/microsoft/go-otel-audit/v2/audit/conn/internal/writer"
@@ -27,15 +28,19 @@ func (TCPConn) private() {}
 // NewTCPConn creates a new connection to the remote audit server. addr is the host:port of the remote audit server.
 // host can be an IP address or a hostname. If host is a hostname, it will be resolved to an IP address.
 func NewTCPConn(addr string) (TCPConn, error) {
+	l := writer.ClosePool.Len()
+	if l >= 10 {
+		return TCPConn{}, fmt.Errorf("there are %d TCP connections trying to close, there indicates some system level error", l)
+	}
+
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return TCPConn{}, err
 	}
 	w, err := writer.New(conn)
 	if err != nil {
-		go func() {
-			_ = conn.Close() // Close the connection if writer creation fails
-		}()
+		_ = conn.Close() // Close the connection if writer creation fails
+		return TCPConn{}, err
 	}
 	return TCPConn{Conn: w}, nil
 }

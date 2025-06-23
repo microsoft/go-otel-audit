@@ -65,6 +65,11 @@ func DSPath(path string) DSOption {
 
 // NewDomainSocket creates a new connection to the remote audit server.
 func NewDomainSocket(options ...DSOption) (DomainSocketConn, error) {
+	l := writer.ClosePool.Len()
+	if l >= 10 {
+		return DomainSocketConn{}, fmt.Errorf("there are %d Domain Socket connections trying to close, there indicates some system level error", l)
+	}
+
 	opts := dsOptions{}
 
 	for _, o := range options {
