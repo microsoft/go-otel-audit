@@ -33,7 +33,7 @@ func TestDeleteSocket(t *testing.T) {
 		}
 	}()
 
-	conn, err := NewDomainSocket(DSPath("/tmp/audit.sock"))
+	conn, err := NewDomainSocket(DomainSocketPath("/tmp/audit.sock"))
 	if err != nil {
 		t.Fatalf("unable to create domain socket client: %v", err)
 	}

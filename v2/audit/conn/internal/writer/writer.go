@@ -21,22 +21,13 @@ type Conn struct {
 	now  now
 }
 
-// Option is an optional argument for the New() function to configure the connection.
-type Option func(c *Conn) error
-
 // New creates a new connection to the remote audit server.
-func New(conn net.Conn, options ...Option) (*Conn, error) {
-	c := &Conn{conn: conn, now: time.Now}
-	for _, o := range options {
-		if err := o(c); err != nil {
-			return nil, err
-		}
-	}
-	return c, nil
+func New(conn net.Conn) (*Conn, error) {
+	return &Conn{conn: conn, now: time.Now}, nil
 }
 
-// Write writes a message to the remote audit server. Setting a timeout
-// on the context will set the write deadline.
+// Write writes a message to the remote audit server. Setting a timeout on the context has no effect.
+// The write deadline is set to 15 seconds from the current time.
 func (c *Conn) Write(msg msgs.Msg) error {
 	c.conn.SetWriteDeadline(c.now().Add(15 * time.Second))
 

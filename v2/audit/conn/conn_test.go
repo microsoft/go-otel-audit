@@ -64,7 +64,7 @@ func TestWriters(t *testing.T) {
 				return server.New("unix", dsAddr)
 			},
 			newConn: func() (Audit, error) {
-				return NewDomainSocket(DSPath(dsAddr))
+				return NewDomainSocket(DomainSocketPath(dsAddr))
 			},
 		},
 		{
@@ -78,10 +78,11 @@ func TestWriters(t *testing.T) {
 		},
 	}
 
+	t.Cleanup(func() { os.Remove(dsAddr) })
+
 	for _, test := range tests {
-		test := test
 		t.Run(test.desc, func(t *testing.T) {
-			os.Remove("/tmp/audit.sock")
+			os.Remove(dsAddr)
 
 			serv, err := test.newServer()
 			if err != nil {
@@ -133,9 +134,9 @@ func TestWriters(t *testing.T) {
 			expect := 0
 			switch {
 			case test.resetErr && !hadErr:
-				t.Fatalf("expected an error, but didn't get one")
+				t.Fatalf("got err == nil, want err != nil")
 			case !test.resetErr && hadErr:
-				t.Fatalf("expected no error, but got one")
+				t.Fatalf("got err == %v, want err == nil", err)
 			case hadErr:
 				expect = numTestMsgs - 1
 			case !hadErr:

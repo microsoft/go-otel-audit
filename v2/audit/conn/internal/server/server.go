@@ -91,7 +91,7 @@ func (c *AuditRecordTest) restart() {
 	}
 	c.l = l
 
-	go c.accept()
+	c.accept()
 }
 
 // MsgCh returns the channel that messages are sent to.

@@ -51,12 +51,12 @@ func (o *dsOptions) setDefaults() {
 	}
 }
 
-// DSOption is an option for NewDomainSocket.
-type DSOption func(*dsOptions) error
+// DomanSocketOption is an option for NewDomainSocket.
+type DomanSocketOption func(*dsOptions) error
 
-// DSPath sets the path to the unix domain socket. This is usually automatically detected and should
+// DomainSocketPath sets the path to the unix domain socket. This is usually automatically detected and should
 // only be overridden in very specific circumstances.
-func DSPath(path string) DSOption {
+func DomainSocketPath(path string) DomanSocketOption {
 	return func(o *dsOptions) error {
 		o.path = path
 		return nil
@@ -64,7 +64,7 @@ func DSPath(path string) DSOption {
 }
 
 // NewDomainSocket creates a new connection to the remote audit server.
-func NewDomainSocket(options ...DSOption) (DomainSocketConn, error) {
+func NewDomainSocket(options ...DomanSocketOption) (DomainSocketConn, error) {
 	l := writer.ClosePool.Len()
 	if l >= 10 {
 		return DomainSocketConn{}, fmt.Errorf("there are %d Domain Socket connections trying to close, there indicates some system level error", l)

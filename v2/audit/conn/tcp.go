@@ -30,7 +30,7 @@ func (TCPConn) private() {}
 func NewTCPConn(addr string) (TCPConn, error) {
 	l := writer.ClosePool.Len()
 	if l >= 10 {
-		return TCPConn{}, fmt.Errorf("there are %d TCP connections trying to close, there indicates some system level error", l)
+		return TCPConn{}, fmt.Errorf("there are %d TCP connections trying to close, this indicates some system level error", l)
 	}
 
 	conn, err := net.Dial("tcp", addr)
