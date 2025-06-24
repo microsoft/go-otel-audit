@@ -28,7 +28,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/microsoft/go-otel-audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/v2/audit/msgs"
 
 	"github.com/go-json-experiment/json"
 	"github.com/vmihailenco/msgpack/v4"
@@ -91,7 +91,7 @@ func (c *AuditRecordTest) restart() {
 	}
 	c.l = l
 
-	go c.accept()
+	c.accept()
 }
 
 // MsgCh returns the channel that messages are sent to.
