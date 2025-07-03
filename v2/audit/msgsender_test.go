@@ -221,7 +221,6 @@ func TestMsgSenderStart(t *testing.T) {
 			continue
 		}
 	}
-
 }
 
 func TestServiceMsg(t *testing.T) {
@@ -314,6 +313,48 @@ func TestServiceMsg(t *testing.T) {
 		if diff := (&pretty.Config{PrintStringers: true}).Compare(test.want, sender.testParams.writeCount); diff != "" {
 			t.Errorf("TestServiceMsg(%s): writeCount mismatch (-want +got):\n%s", test.name, diff)
 		}
+	}
+}
+
+func TestMsgSenderHB(t *testing.T) {
+	// Do not do parallel since we manipulate the package level tickerDur variable.
+
+	params := &testParams{
+		writerVals: []error{nil, nil, nil}, // The extra is the heartbeat
+	}
+
+	sender := &msgSender{
+		testParams: params,
+		client:     &Client{sendCh: make(chan msgs.Msg, 1)},
+		heartbeat:  msgs.Msg{Type: msgs.Heartbeat},
+	}
+
+	sender.client.sendCh <- msgs.Msg{Type: msgs.ControlPlane} // Send a control plane message, which triggers first heartbeat
+
+	oldTickerDur := tickerDur
+	tickerDur = 10 * time.Millisecond // Shorten the ticker duration for testing
+	t.Cleanup(
+		func() {
+			tickerDur = oldTickerDur
+		},
+	)
+
+	// Service initial message and hearbeat
+	if err := sender.serviceMsg(t.Context()); err != nil {
+		t.Fatalf("TestMsgSenderHB: serviceMsg failed: %s", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	// Should send second heartbat from the ticker.
+	if err := sender.serviceMsg(t.Context()); err != nil {
+		t.Fatalf("TestMsgSenderHB: serviceMsg failed on second heartbeat: %s", err)
+	}
+
+	if params.writeCount[msgs.ControlPlane] != 1 {
+		t.Errorf("TestMsgSenderHB: expected 1 control plane message, got %d", params.writeCount[msgs.ControlPlane])
+	}
+	if params.writeCount[msgs.Heartbeat] != 2 {
+		t.Errorf("TestMsgSenderHB: expected 2 heartbeats, got %d", params.writeCount[msgs.Heartbeat])
 	}
 }
 

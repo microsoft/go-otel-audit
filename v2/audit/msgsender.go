@@ -98,6 +98,8 @@ func (m *msgSender) sender(ctx context.Context) error {
 	}
 }
 
+var tickerDur = 30 * time.Minute // Default ticker duration for heartbeats.
+
 // service msg handles the sending of messages to the audit server. It yanks the a message off the send channel
 // and writes it to the audit server. If the ticker is set, it will also send a heartbeat message at intervals.
 // Heartbeats only happens after a successful message has been sent, which is a requirment in the designs for the service.
@@ -115,7 +117,7 @@ func (m *msgSender) serviceMsg(ctx context.Context) (err error) {
 
 	select {
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	// Send message and if its the first message, also send a heartbeat. Start a ticker for heartbeats.
 	case msg := <-m.client.sendCh:
 		if err := m.write(msg); err != nil {
@@ -126,7 +128,7 @@ func (m *msgSender) serviceMsg(ctx context.Context) (err error) {
 			if err := m.write(m.heartbeat); err != nil {
 				return err
 			}
-			m.ticker = time.NewTicker(30 * time.Minute)
+			m.ticker = time.NewTicker(tickerDur)
 			m.tickerCh = m.ticker.C
 		}
 	// Send heartbeat if we have one and the ticker is set.

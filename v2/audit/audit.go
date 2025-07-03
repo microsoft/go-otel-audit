@@ -17,7 +17,7 @@ Example using the domainsocket package:
 
 	// Creates the smart client to the remote audit server.
 	// You should only create one of these, preferrably in main().
-	c, err := audit.New(cc)
+	c, err := audit.New(ctx, cc)
 	if err != nil {
 		// Handle error.
 	}
@@ -37,8 +37,10 @@ Example using the domainsocket package:
 		// Errors here will either be:
 		// 1. ErrValidation , which means your message is invalid.
 		// 2. ErrQueueFull, which means the queue is full and you are responsible for the message.
-		// 3. A standard error, which means there is an error condition we haven't categorized yet.
-		// If #3 happens, please file a bug report as we shouldn't send non-categorized errors to the user.
+		// 3. ErrClientDead, which means the client is dead and will not recover. This is due to connections not closing for some reason.
+		// 4. A standard error, which means there is an error condition we haven't categorized yet.
+		// If #4 happens, please file a bug report as we shouldn't send non-categorized errors to the user.
+		// You need to use errors.Is() or errors.As() to check for these errors.
 	}
 */
 package audit
@@ -97,15 +99,19 @@ type Client struct {
 	// queueSize is the size of the queue for sending audit records.
 	queueSize int
 	// sendCh is the channel for sending audit records to our async sender. It has a buffer
-	// capacity of MaxQueueSize.
+	// capacity of queueSize.
 	sendCh chan msgs.Msg
 
 	// create is the function that creates a new connection to the remote audit server. This is used when the
 	// connection is broken.
 	create CreateConn
 
-	// backoff is the exponential backoff for making a new connection to the remote audit server.
-	backoff *exponential.Backoff
+	// manageSenderBackoff is the exponential manageSenderBackoff for making a new connection to the remote audit server.
+	// It retries forever until it succeeds and should only be used by manageSender. It only stops trying backoffs if
+	// it has had a bunch of failed clients and none of them are closing. This is to prevent runaway goroutines when
+	// a bad file descriptor is causing system calls to fail, which can happen in weird situations like host mounting
+	// a domain socket in K8s incorrectly so that when the node switches it out the file descriptor is broken.
+	manageSenderBackoff *exponential.Backoff
 
 	// closers is a group used to track the number of conn objects that are currently having their CloseSend method called.
 	// This is used to prevent runaway goroutines that can cause the system to run out of resources.
@@ -130,7 +136,7 @@ type Client struct {
 	// below here are used for testing purposes only.
 
 	testContext context.Context
-	testparams  *testParams
+	testParams  *testParams
 }
 
 // CreateConn is a function that creates a connection to a remote audit server.
@@ -176,16 +182,16 @@ func New(ctx context.Context, create CreateConn, options ...Option) (*Client, er
 	g := context.Pool(ctx).Sub(ctx, "AuditClientConnClosers").Group()
 
 	c := &Client{
-		kver:       kver,
-		goos:       runtime.GOOS,
-		queueSize:  DefaultQueueSize,
-		create:     create,
-		notifier:   make(chan NotifyError, 1),
-		closers:    &g,
-		maxClosers: 1000,
-		metrics:    newMetrics(),
-		backoff:    backoff,
-		log:        slog.Default(),
+		kver:                kver,
+		goos:                runtime.GOOS,
+		queueSize:           DefaultQueueSize,
+		create:              create,
+		notifier:            make(chan NotifyError, 1),
+		closers:             &g,
+		maxClosers:          1000,
+		metrics:             newMetrics(),
+		manageSenderBackoff: backoff,
+		log:                 slog.Default(),
 	}
 
 	for _, o := range options {
@@ -193,17 +199,17 @@ func New(ctx context.Context, create CreateConn, options ...Option) (*Client, er
 	}
 	c.sendCh = make(chan msgs.Msg, c.queueSize)
 
-	if err := c.connManager(); err != nil {
+	if err := c.startConnManager(); err != nil {
 		return nil, fmt.Errorf("failed to start connection manager: %w", err)
 	}
 
 	return c, nil
 }
 
-// connManager starts the initial connection and calls the newMsgSender function to create a message sender.
+// startConnManager starts the initial connection and calls the newMsgSender function to create a message sender.
 // Once the initial connection is established, it will manage the sender in a separate goroutine. If it cannot
 // setup the initial connection, this will return an error.
-func (c *Client) connManager() error {
+func (c *Client) startConnManager() error {
 	sender, err := c.newSender()
 	if err != nil {
 		return fmt.Errorf("failed to create message sender: %w", err)
@@ -243,7 +249,7 @@ func (c *Client) manageSender(sender msgSenderer) {
 			return
 		}
 
-		err = c.backoff.Retry(
+		err = c.manageSenderBackoff.Retry(
 			context.Background(),
 			func(ctx context.Context, r exponential.Record) error {
 				if c.closers.Running() > c.maxClosers {
@@ -268,8 +274,8 @@ func (c *Client) manageSender(sender msgSenderer) {
 
 // newSender simply creates a new msgSender with a new connection to the remote audit server.
 func (c *Client) newSender() (msgSenderer, error) {
-	if testing.Testing() && c.testparams != nil && len(c.testparams.senders) > 0 {
-		return c.testparams.newSender()
+	if testing.Testing() && c.testParams != nil && len(c.testParams.senders) > 0 {
+		return c.testParams.newSender()
 	}
 
 	auditConn, err := c.create()

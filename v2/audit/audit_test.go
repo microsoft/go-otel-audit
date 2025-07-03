@@ -144,7 +144,6 @@ func TestManageSender(t *testing.T) {
 					Multiplier:          1.1,
 					RandomizationFactor: 0.1,
 					MaxInterval:         1 * time.Second,
-					//MaxAttempts:         2,
 				},
 			),
 		)
@@ -157,29 +156,27 @@ func TestManageSender(t *testing.T) {
 		defer cancel()
 
 		client := &Client{
-			notifier:    make(chan NotifyError, 10),
-			closers:     &sync.Group{},
-			maxClosers:  3,
-			sendCh:      make(chan msgs.Msg, 1),
-			metrics:     newMetrics(),
-			backoff:     back,
-			log:         slog.Default(),
-			clientDead:  atomic.Bool{},
-			testContext: ctx, // Use testContext to control execution deterministically
-			testparams:  &testParams{senders: test.newSenderResps},
+			notifier:            make(chan NotifyError, 10),
+			closers:             &sync.Group{},
+			maxClosers:          3,
+			sendCh:              make(chan msgs.Msg, 1),
+			metrics:             newMetrics(),
+			manageSenderBackoff: back,
+			log:                 slog.Default(),
+			clientDead:          atomic.Bool{},
+			testContext:         ctx, // Use testContext to control execution deterministically
+			testParams:          &testParams{senders: test.newSenderResps},
 		}
 
 		closeMe := make(chan struct{})
-		if test.backgroundClosers > 0 {
-			for i := 0; i < test.backgroundClosers; i++ {
-				client.closers.Go(
-					t.Context(),
-					func(ctx context.Context) error {
-						<-closeMe // Wait for the test to signal closure
-						return nil
-					},
-				)
-			}
+		for i := 0; i < test.backgroundClosers; i++ {
+			client.closers.Go(
+				t.Context(),
+				func(ctx context.Context) error {
+					<-closeMe // Wait for the test to signal closure
+					return nil
+				},
+			)
 		}
 		defer close(closeMe)
 
