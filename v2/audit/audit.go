@@ -234,7 +234,10 @@ func (c *Client) manageSender(sender msgSenderer) {
 	}
 
 	for {
-		err := <-sender.start(ctx) // DO NOT used a passed context here that can be cancelled except in tests.
+		// DO NOT used a passed context here that can be cancelled except in tests.
+		// We use context for values, but here we want to run indefinitely until the client is dead.
+		// The only reason it should return an error is because the connection is broken.
+		err := <-sender.start(ctx)
 		if err == nil {
 			if !testing.Testing() {
 				c.sendNotify(errors.New("bug: audit.Client connection looks to be closed by user, but we don't have a Close() method"))
