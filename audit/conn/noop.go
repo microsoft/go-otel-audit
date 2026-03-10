@@ -1,7 +1,7 @@
 package conn
 
 import (
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 // Compile check on interface implementation.

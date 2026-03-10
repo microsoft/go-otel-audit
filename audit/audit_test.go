@@ -13,9 +13,9 @@ import (
 	"github.com/Azure/retry/exponential"
 	"github.com/gostdlib/base/concurrency/sync"
 	"github.com/kylelemons/godebug/pretty"
-	"github.com/microsoft/go-otel-audit/audit/audit/conn"
-	"github.com/microsoft/go-otel-audit/audit/audit/internal/version"
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/internal/version"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 var validRecord = msgs.Record{

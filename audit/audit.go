@@ -55,9 +55,9 @@ import (
 
 	"github.com/gostdlib/base/concurrency/sync"
 	"github.com/gostdlib/base/context"
-	"github.com/microsoft/go-otel-audit/audit/audit/conn"
-	"github.com/microsoft/go-otel-audit/audit/audit/internal/version"
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/internal/version"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 
 	"github.com/Azure/retry/exponential"
 )

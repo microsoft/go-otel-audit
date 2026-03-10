@@ -2,7 +2,7 @@
 package conn
 
 import (
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 //go:generate stringer -type=Type -linecomment

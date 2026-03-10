@@ -3,7 +3,7 @@ package conn
 import (
 	"testing"
 
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 // TestHangConn is a test connection that hangs on CloseSend to simulate a hanging bug.

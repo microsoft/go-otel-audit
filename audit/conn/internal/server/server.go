@@ -28,7 +28,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 
 	"github.com/go-json-experiment/json"
 	"github.com/vmihailenco/msgpack/v4"

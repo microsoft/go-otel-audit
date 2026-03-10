@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 type fakeNetConn struct {
