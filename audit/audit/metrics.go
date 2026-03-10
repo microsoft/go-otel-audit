@@ -9,12 +9,13 @@ import (
 )
 
 type metrics struct {
-	meter        metric.Meter
-	msgsSent     metric.Int64Counter
-	msgsRequeued metric.Int64Counter
-	msgsDropped  metric.Int64Counter
-	msgErrs          metric.Int64Counter
-	heartbeatDropped metric.Int64Counter
+	meter             metric.Meter
+	msgsSent          metric.Int64Counter
+	msgsRequeued      metric.Int64Counter
+	msgsDropped       metric.Int64Counter
+	msgErrs           metric.Int64Counter
+	heartbeatDropped  metric.Int64Counter
+	diagnosticDropped metric.Int64Counter
 
 	// requeuedCounter exists to track the number of requeued messages in a test.
 	// You cannot extract the value from an otel counter.

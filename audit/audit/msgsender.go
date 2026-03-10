@@ -160,8 +160,12 @@ func (m *msgSender) write(msg msgs.Msg) error {
 			default:
 				m.client.metrics.msgsDropped.Add(ctx, 1)
 			}
-		default:
+		case msgs.Heartbeat:
 			m.client.metrics.heartbeatDropped.Add(ctx, 1)
+		case msgs.Diagnostic:
+			m.client.metrics.diagnosticDropped.Add(ctx, 1)
+		default:
+			context.Log(ctx).Error(fmt.Sprintf("unknown message type %v, cannot categorize error metrics", msg.Type))
 		}
 		m.client.sendNotify(err)
 		return err
