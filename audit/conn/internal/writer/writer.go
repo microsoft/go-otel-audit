@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gostdlib/base/context"
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 // ClosePool is a goroutine pool for closing connections to a remote audit server.

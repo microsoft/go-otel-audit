@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/microsoft/go-otel-audit/audit/audit"
-	"github.com/microsoft/go-otel-audit/audit/audit/conn"
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 func TestSlowListeningMDSD(t *testing.T) {

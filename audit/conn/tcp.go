@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/microsoft/go-otel-audit/audit/audit/conn/internal/writer"
+	"github.com/microsoft/go-otel-audit/audit/conn/internal/writer"
 )
 
 // Compile check on interface implementation.

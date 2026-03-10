@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/kylelemons/godebug/pretty"
-	"github.com/microsoft/go-otel-audit/audit/audit/conn"
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 func TestMsgSenderArgsValidate(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/gostdlib/base/context"
-	"github.com/microsoft/go-otel-audit/audit/audit/conn"
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/conn"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 // msgSender handles the sending of messages to the audit server for a Client.

@@ -1,7 +1,7 @@
 package audit
 
 import (
-	"github.com/microsoft/go-otel-audit/audit/audit/msgs"
+	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
 
 type newSenderResp struct {
