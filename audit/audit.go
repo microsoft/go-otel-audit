@@ -17,7 +17,7 @@ Example using the domainsocket package:
 
 	// Creates the smart client to the remote audit server.
 	// You should only create one of these, preferrably in main().
-	c, err := audit.New(ctx, cc)
+	c, err := audit.New(ctx, serviceTreeID, cc)
 	if err != nil {
 		// Handle error.
 	}
@@ -53,6 +53,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gostdlib/base/concurrency/sync"
 	"github.com/gostdlib/base/context"
 	"github.com/microsoft/go-otel-audit/audit/conn"
@@ -91,6 +92,8 @@ type NotifyError struct {
 // Client is an audit server smart client. This handles any connection problems silently, while providing ways to
 // detect problems through whatever alerting method is desired.
 type Client struct {
+	// serviceTreeID is a Microsoft GUID representing a value in the service tree service.
+	serviceTreeID string
 	// kver is the kernel version of the host
 	kver string
 	// goos is the operating system of the host. This is set to runtime.GOOS.
@@ -167,7 +170,10 @@ func WithLogger(l *slog.Logger) Option {
 // New creates a new smart client to the remote audit server. You can get a CreateConn
 // from conn.NewDomainSocket(), conn.NewTCP() or conn.NewNoop(). The last one is useful for testing
 // when you don't want to send logs anywhere.
-func New(ctx context.Context, create CreateConn, options ...Option) (*Client, error) {
+func New(ctx context.Context, serviceTreeID uuid.UUID, create CreateConn, options ...Option) (*Client, error) {
+	if serviceTreeID == uuid.Nil {
+		return nil, fmt.Errorf("serviceTreeID cannot be nil: %w", ErrValidation)
+	}
 	kver, err := kernelVer()
 	if err != nil {
 		return nil, fmt.Errorf("could not determine kernel version on platform: %w", err)
@@ -186,6 +192,7 @@ func New(ctx context.Context, create CreateConn, options ...Option) (*Client, er
 	}
 
 	c := &Client{
+		serviceTreeID:       serviceTreeID.String(),
 		kver:                kver,
 		goos:                runtime.GOOS,
 		queueSize:           DefaultQueueSize,
@@ -311,10 +318,11 @@ func (c *Client) newSender() (msgSenderer, error) {
 	hb := msgs.Msg{
 		Type: msgs.Heartbeat,
 		Heartbeat: msgs.HeartbeatMsg{
-			AuditVersion: version.Semantic,
-			OsVersion:    c.kver,
-			Language:     runtime.Version(),
-			Destination:  auditConn.Type().String(),
+			ServiceTreeID: c.serviceTreeID,
+			AuditVersion:  version.Semantic,
+			OsVersion:     c.kver,
+			Language:      runtime.Version(),
+			Destination:   auditConn.Type().String(),
 		},
 	}
 
@@ -357,6 +365,10 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) 
 	// like a heartbeat.
 	if msg.Type == msgs.ATUnknown || msg.Type > msgs.ControlPlane {
 		return fmt.Errorf("audit type (%v) is invalid: %w", msg.Type, ErrValidation)
+	}
+	switch msg.Type {
+	case msgs.ControlPlane, msgs.DataPlane:
+		msg.Record.ServiceTreeID = c.serviceTreeID
 	}
 
 	if err := msg.Record.Validate(); err != nil {

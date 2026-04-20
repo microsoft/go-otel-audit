@@ -76,7 +76,10 @@ func TestSend(t *testing.T) {
 			test.ctx = context.Background()
 		}
 
-		client := &Client{metrics: mustNewMetrics()}
+		client := &Client{
+			serviceTreeID: "e6c9fcb1-7f08-4c1d-9e7a-123456789abc",
+			metrics:       mustNewMetrics(),
+		}
 		client.sendCh = test.sendCh
 
 		err := client.Send(test.ctx, test.msg)
