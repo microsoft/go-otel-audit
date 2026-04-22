@@ -3,6 +3,8 @@ package msgs
 // HeartbeatMsg is a message sent to the audit server with various endpoint information.
 // This is sent periodically by the client and does not require a user to send it.
 type HeartbeatMsg struct {
+	// ServiceTreeID is the GUID of the service in service tree.
+	ServiceTreeID string `msgpack:"AsmAuditServiceId" json:"AsmAuditServiceId"`
 	// AuditVersion is the version of the audit client.
 	AuditVersion string
 	// OsVersion is the version of the operating system.

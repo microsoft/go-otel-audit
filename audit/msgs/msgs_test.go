@@ -358,11 +358,18 @@ func TestJSONMarshalUnmarshal(t *testing.T) {
 }
 
 func TestRecordValidate(t *testing.T) {
+	const stID = "e6c9fcb1-7f08-4c1d-9e7a-123456789abc"
+
 	testCases := []struct {
 		name           string
 		auditRecord    Record
 		expectedResult error
 	}{
+		{
+			name:           "Missing ServiceTreeID",
+			auditRecord:    Record{},
+			expectedResult: fmt.Errorf("service tree ID is required"),
+		},
 		{
 			name:        "Missing OperationName",
 			auditRecord: Record{
@@ -614,6 +621,13 @@ func TestRecordValidate(t *testing.T) {
 
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
+			// Every case except the dedicated "Missing ServiceTreeID" case needs a
+			// ServiceTreeID set so the new first-line check in Validate doesn't mask
+			// the field-specific error the case is trying to exercise.
+			if test.name != "Missing ServiceTreeID" {
+				test.auditRecord.ServiceTreeID = stID
+			}
+
 			err := test.auditRecord.Validate()
 			switch {
 			case err == nil && test.expectedResult != nil:
@@ -751,4 +765,100 @@ func TestBytesToStr(t *testing.T) {
 	b := []byte("Update")
 	s := bytesToStr(b)
 	assert.Equal(t, "Update", s)
+}
+
+// TestMarshalMsgpackWireKeys exercises the real wire encoding through
+// MarshalMsgpack and decodes the bytes back so struct-tag typos cannot slip
+// through. The outer envelope produced by marshalPrep looks like:
+//
+//	[type_string, [[timestamp, body]], {TimeFormat: "DateTime"}]
+//
+// where body is the serialized Record or HeartbeatMsg as a map.
+func TestMarshalMsgpackWireKeys(t *testing.T) {
+	t.Parallel()
+
+	n := func() time.Time { return time.Unix(1234, 0) }
+
+	const stID = "e6c9fcb1-7f08-4c1d-9e7a-123456789abc"
+
+	tests := []struct {
+		name      string
+		msg       Msg
+		wireKey   string
+		wireValue string
+	}{
+		{
+			name: "Success: DataPlane Record marshals ServiceTreeID as env_ikey",
+			msg: Msg{
+				now:    n,
+				Type:   DataPlane,
+				Record: Record{ServiceTreeID: stID},
+			},
+			wireKey:   "env_ikey",
+			wireValue: stID,
+		},
+		{
+			name: "Success: ControlPlane Record marshals ServiceTreeID as env_ikey",
+			msg: Msg{
+				now:    n,
+				Type:   ControlPlane,
+				Record: Record{ServiceTreeID: stID},
+			},
+			wireKey:   "env_ikey",
+			wireValue: stID,
+		},
+		{
+			name: "Success: Heartbeat marshals ServiceTreeID as AsmAuditServiceId",
+			msg: Msg{
+				now:       n,
+				Type:      Heartbeat,
+				Heartbeat: HeartbeatMsg{ServiceTreeID: stID},
+			},
+			wireKey:   "AsmAuditServiceId",
+			wireValue: stID,
+		},
+	}
+
+	for _, test := range tests {
+		data, err := MarshalMsgpack(test.msg)
+		if err != nil {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): MarshalMsgpack: got err == %s, want err == nil", test.name, err)
+			continue
+		}
+
+		var wire []any
+		if err := msgpack.Unmarshal(data, &wire); err != nil {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): msgpack.Unmarshal: got err == %s, want err == nil", test.name, err)
+			continue
+		}
+
+		if len(wire) != 3 {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): outer envelope length = %d, want 3", test.name, len(wire))
+			continue
+		}
+
+		outer, ok := wire[1].([]any)
+		if !ok || len(outer) != 1 {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): wire[1] = %T (len %d), want []any of length 1", test.name, wire[1], len(outer))
+			continue
+		}
+		inner, ok := outer[0].([]any)
+		if !ok || len(inner) != 2 {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): wire[1][0] = %T (len %d), want []any of length 2", test.name, outer[0], len(inner))
+			continue
+		}
+
+		body, ok := inner[1].(map[string]any)
+		if !ok {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): body type = %T, want map[string]any", test.name, inner[1])
+			continue
+		}
+
+		if v, _ := body[test.wireKey].(string); v != test.wireValue {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): body[%q] = %v, want %q", test.name, test.wireKey, body[test.wireKey], test.wireValue)
+		}
+		if _, ok := body["ServiceTreeID"]; ok {
+			t.Errorf("TestMarshalMsgpackWireKeys(%s): found unexpected ServiceTreeID key; wire must use %q", test.name, test.wireKey)
+		}
+	}
 }

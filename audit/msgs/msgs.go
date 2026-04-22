@@ -517,6 +517,8 @@ func (t TargetResourceEntry) Validate() error {
 type Record struct {
 	now func() time.Time `msgpack:"-" json:"-"`
 
+	// ServiceTreeID is the ID in service tree this belongs to. On the wire, this is env_ikey.
+	ServiceTreeID string `msgpack:"env_ikey" json:"env_ikey"`
 	// CallerIpAddress is the IP address of the caller.
 	CallerIpAddress Addr
 	// CallerIdentities is the identities that initiated the operation.
@@ -591,6 +593,9 @@ func (a Record) Validate() (err error) {
 	// If the server doesn't do any validation, then it should be fixed there if this is a problem.
 	// Because anyone can just write to the security endpoint.
 
+	if a.ServiceTreeID == "" {
+		return fmt.Errorf("service tree ID is required")
+	}
 	if a.OperationName == "" {
 		return fmt.Errorf("operation name is required")
 	}

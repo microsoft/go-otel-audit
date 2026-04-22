@@ -76,7 +76,10 @@ func TestSend(t *testing.T) {
 			test.ctx = context.Background()
 		}
 
-		client := &Client{metrics: mustNewMetrics()}
+		client := &Client{
+			serviceTreeID: "e6c9fcb1-7f08-4c1d-9e7a-123456789abc",
+			metrics:       mustNewMetrics(),
+		}
 		client.sendCh = test.sendCh
 
 		err := client.Send(test.ctx, test.msg)
@@ -278,10 +281,13 @@ func TestNewSender(t *testing.T) {
 		},
 	}
 
+	const testServiceTreeID = "e6c9fcb1-7f08-4c1d-9e7a-123456789abc"
+
 	for _, test := range tests {
 		client := &Client{
-			kver: "test-kernel",
-			goos: test.goos,
+			serviceTreeID: testServiceTreeID,
+			kver:          "test-kernel",
+			goos:          test.goos,
 			create: func() (conn.Audit, error) {
 				if test.createErr != nil {
 					return nil, test.createErr
@@ -324,10 +330,11 @@ func TestNewSender(t *testing.T) {
 		}
 
 		wantHB := msgs.HeartbeatMsg{
-			AuditVersion: version.Semantic,
-			OsVersion:    client.kver,
-			Language:     runtime.Version(),
-			Destination:  test.connType.String(),
+			ServiceTreeID: testServiceTreeID,
+			AuditVersion:  version.Semantic,
+			OsVersion:     client.kver,
+			Language:      runtime.Version(),
+			Destination:   test.connType.String(),
 		}
 
 		s := sender.(*msgSender)

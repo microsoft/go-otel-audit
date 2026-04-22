@@ -35,7 +35,7 @@ cc := func() (conn.Audit, error) {
 
 // Creates the smart client to the remote audit server.
 // You should only create one of these, preferrably in main().
-c, err := audit.New(cc)
+c, err := audit.New(ctx, serviceTreeID, cc)
 if err != nil {
 	// Handle error.
 }

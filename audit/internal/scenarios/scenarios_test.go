@@ -52,7 +52,7 @@ func TestSlowListeningMDSD(t *testing.T) {
 
 	// Creates the smart client to the remote audit server.
 	// You should only create one of these, preferrably in main().
-	c, err := audit.New(t.Context(), cc, audit.WithQueueSize(auditLogQueueSize))
+	c, err := audit.New(t.Context(), uuid.New(), cc, audit.WithQueueSize(auditLogQueueSize))
 	if err != nil {
 		panic(err)
 	}
@@ -92,7 +92,7 @@ func TestNonExistingSocket(t *testing.T) {
 
 	// Creates the smart client to the remote audit server.
 	// You should only create one of these, preferrably in main().
-	_, err := audit.New(t.Context(), cc)
+	_, err := audit.New(t.Context(), uuid.New(), cc)
 	if err != nil {
 		return
 	}
