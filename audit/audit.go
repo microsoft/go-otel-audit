@@ -109,7 +109,8 @@ type Client struct {
 	create CreateConn
 
 	// manageSenderBackoff is the exponential manageSenderBackoff for making a new connection to the remote audit server.
-	// It retries forever until it succeeds and should only be used by manageSender. It only stops trying backoffs if
+	// It retries forever until it succeeds and should only be used by reconnect (called from manageSender and the
+	// deferred connection path). It only stops trying backoffs if
 	// it has had a bunch of failed clients and none of them are closing. This is to prevent runaway goroutines when
 	// a bad file descriptor is causing system calls to fail, which can happen in weird situations like host mounting
 	// a domain socket in K8s incorrectly so that when the node switches it out the file descriptor is broken.
@@ -134,6 +135,10 @@ type Client struct {
 
 	// log is the logger for the audit client. If not set, the default logger is used.
 	log *slog.Logger
+
+	// deferredConn, when true, makes New() return a working client even if the initial connection
+	// to the remote audit server cannot be established. See WithDeferredConnection().
+	deferredConn bool
 
 	// below here are used for testing purposes only.
 
@@ -163,6 +168,19 @@ func WithQueueSize(size int) Option {
 func WithLogger(l *slog.Logger) Option {
 	return func(c *Client) error {
 		c.log = l
+		return nil
+	}
+}
+
+// WithDeferredConnection makes New() return a working client immediately even if the initial
+// connection to the remote audit server cannot be established. New() still attempts a real
+// connection before returning; if that succeeds, the client behaves normally. If it fails, the
+// returned client responds as a no-op (messages are accepted and dropped, with drops recorded
+// in the drop metrics) while it retries the connection in the background with exponential
+// backoff. Once the connection succeeds, messages are sent normally.
+func WithDeferredConnection() Option {
+	return func(c *Client) error {
+		c.deferredConn = true
 		return nil
 	}
 }
@@ -206,7 +224,9 @@ func New(ctx context.Context, serviceTreeID uuid.UUID, create CreateConn, option
 	}
 
 	for _, o := range options {
-		o(c)
+		if err := o(c); err != nil {
+			return nil, err
+		}
 	}
 	c.sendCh = make(chan msgs.Msg, c.queueSize)
 
@@ -217,21 +237,29 @@ func New(ctx context.Context, serviceTreeID uuid.UUID, create CreateConn, option
 	return c, nil
 }
 
-// startConnManager starts the initial connection and calls the newMsgSender function to create a message sender.
+// startConnManager starts the initial connection by calling newSender to create a message sender.
 // Once the initial connection is established, it will manage the sender as a background task. If it cannot
-// setup the initial connection, this will return an error.
+// setup the initial connection, this will return an error, unless WithDeferredConnection() was set, in which
+// case it serves with a no-op sender while it establishes the real connection in the background.
 func (c *Client) startConnManager() error {
-	sender, err := c.newSender()
+	sender, err := c.createSender()
 	if err != nil {
-		return fmt.Errorf("failed to create message sender: %w", err)
+		if !c.deferredConn {
+			return fmt.Errorf("failed to create message sender: %w", err)
+		}
+		return c.startDeferred()
 	}
+	return c.launchManager(sender)
+}
 
+// launchManager runs manageSender for the given sender as a one-shot background task.
+func (c *Client) launchManager(sender msgSenderer) error {
 	ctx := context.Background()
 	if c.testContext != nil && testing.Testing() {
 		ctx = c.testContext
 	}
 
-	err = context.Tasks(ctx).Once(ctx, "manageSender", func(ctx context.Context) error {
+	err := context.Tasks(ctx).Once(ctx, "manageSender", func(ctx context.Context) error {
 		c.manageSender(sender)
 		return nil
 	})
@@ -239,6 +267,53 @@ func (c *Client) startConnManager() error {
 		return fmt.Errorf("failed to start connection manager task: %w", err)
 	}
 	return nil
+}
+
+// startDeferred is used when the initial connection fails and WithDeferredConnection() is set. It serves
+// messages with a no-op sender so the client responds immediately, while a background task retries the real
+// connection with exponential backoff. Once the real connection is established, the no-op sender is stopped
+// and the normal connection manager takes over.
+func (c *Client) startDeferred() error {
+	noop, err := c.newNoopSender()
+	if err != nil {
+		return fmt.Errorf("failed to create no-op sender: %w", err)
+	}
+
+	ctx := context.Background()
+	if c.testContext != nil && testing.Testing() {
+		ctx = c.testContext
+	}
+
+	noopCtx, cancelNoop := context.WithCancel(ctx)
+
+	err = context.Tasks(ctx).Once(ctx, "deferredConnect", func(ctx context.Context) error {
+		c.deferredConnect(noop, noopCtx, cancelNoop)
+		return nil
+	})
+	if err != nil {
+		cancelNoop()
+		return fmt.Errorf("failed to start deferred connection task: %w", err)
+	}
+	return nil
+}
+
+// deferredConnect runs the no-op sender so the client drains messages, then reconnects to the real audit
+// server using the same backoff and runaway-goroutine guards as manageSender. Once a connection is made,
+// it stops the no-op sender, waits for it to fully stop so it does not race the real sender on the send
+// channel, and hands off to manageSender. If reconnect reports the client is dead, it stops the no-op and
+// returns; Send will then return ErrClientDead.
+func (c *Client) deferredConnect(noop msgSenderer, noopCtx context.Context, cancelNoop context.CancelFunc) {
+	noopDone := noop.start(noopCtx)
+
+	sender := c.reconnect()
+
+	cancelNoop()
+	<-noopDone
+
+	if sender == nil {
+		return
+	}
+	c.manageSender(sender)
 }
 
 type msgSenderer interface {
@@ -274,35 +349,50 @@ func (c *Client) manageSender(sender msgSenderer) {
 			return
 		}
 
-		err = c.manageSenderBackoff.Retry(
-			context.Background(),
-			func(ctx context.Context, r exponential.Record) error {
-				if c.closers.Running() > c.maxClosers {
-					return exponential.ErrPermanent
-				}
-				var err error
-				sender, err = c.newSender()
-				if err != nil {
-					c.sendNotify(fmt.Errorf("audit.Client connection error: %w", err))
-					return err
-				}
-				return nil
-			},
-		)
-		if errors.Is(err, exponential.ErrPermanent) {
-			c.sendNotify(errors.New("audit.Client connection error: too many closers running, stopping connection manager"))
-			c.clientDead.Store(true)
+		sender = c.reconnect()
+		if sender == nil {
 			return
 		}
 	}
 }
 
-// newSender simply creates a new msgSender with a new connection to the remote audit server.
-func (c *Client) newSender() (msgSenderer, error) {
-	if testing.Testing() && c.testParams != nil && len(c.testParams.senders) > 0 {
-		return c.testParams.newSender()
+// reconnect makes a new sender using an exponential backoff that retries until it succeeds. It returns
+// the new sender, or nil if the client is now dead and should stop trying to connect. The client is
+// considered dead when the backoff returns any error: a permanent failure (too many conn closers running,
+// a runaway goroutine guard for the bad file descriptor case) or the retry being aborted (e.g. a cancelled
+// context). In every dead case clientDead is set so Send returns ErrClientDead rather than silently dropping.
+func (c *Client) reconnect() msgSenderer {
+	var sender msgSenderer
+	err := c.manageSenderBackoff.Retry(
+		context.Background(),
+		func(ctx context.Context, r exponential.Record) error {
+			if c.closers.Running() > c.maxClosers {
+				return exponential.ErrPermanent
+			}
+			var err error
+			sender, err = c.createSender()
+			if err != nil {
+				c.sendNotify(fmt.Errorf("audit.Client connection error: %w", err))
+				return err
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, exponential.ErrPermanent):
+			c.sendNotify(errors.New("audit.Client connection error: too many closers running, stopping connection manager"))
+		default:
+			c.sendNotify(fmt.Errorf("audit.Client connection error: reconnect aborted, stopping connection manager: %w", err))
+		}
+		c.clientDead.Store(true)
+		return nil
 	}
+	return sender
+}
 
+// newSender creates a new msgSender with a new connection to the remote audit server.
+func (c *Client) newSender() (*msgSender, error) {
 	auditConn, err := c.create()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audit connection: %w", err)
@@ -315,21 +405,10 @@ func (c *Client) newSender() (msgSenderer, error) {
 		}
 	}
 
-	hb := msgs.Msg{
-		Type: msgs.Heartbeat,
-		Heartbeat: msgs.HeartbeatMsg{
-			ServiceTreeID: c.serviceTreeID,
-			AuditVersion:  version.Semantic,
-			OsVersion:     c.kver,
-			Language:      runtime.Version(),
-			Destination:   auditConn.Type().String(),
-		},
-	}
-
 	sender, err := newMsgSender(
 		msgSenderArgs{
 			conn:      auditConn,
-			heartbeat: hb,
+			heartbeat: c.heartbeat(auditConn.Type()),
 			client:    c,
 		},
 	)
@@ -337,7 +416,52 @@ func (c *Client) newSender() (msgSenderer, error) {
 		c.closeAuditConn(auditConn)
 		return nil, fmt.Errorf("failed to create message sender: %w", err)
 	}
-	return sender, err
+	return sender, nil
+}
+
+// createSender returns a sender for the connection manager. It exists so tests can substitute fake
+// senders via testParams; the production path delegates to newSender. Unlike newSender, it returns the
+// msgSenderer interface because the substituted test senders are not *msgSender.
+func (c *Client) createSender() (msgSenderer, error) {
+	if testing.Testing() && c.testParams != nil && len(c.testParams.senders) > 0 {
+		return c.testParams.newSender()
+	}
+	sender, err := c.newSender()
+	if err != nil {
+		return nil, err
+	}
+	return sender, nil
+}
+
+// newNoopSender creates a msgSender backed by a no-op connection. This is used by deferred connection
+// mode to drain messages while the real connection is being established in the background.
+func (c *Client) newNoopSender() (*msgSender, error) {
+	auditConn := conn.NewNoOP()
+	sender, err := newMsgSender(
+		msgSenderArgs{
+			conn:      auditConn,
+			heartbeat: c.heartbeat(auditConn.Type()),
+			client:    c,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create no-op message sender: %w", err)
+	}
+	return sender, nil
+}
+
+// heartbeat builds the heartbeat message for a connection of the given type.
+func (c *Client) heartbeat(t conn.Type) msgs.Msg {
+	return msgs.Msg{
+		Type: msgs.Heartbeat,
+		Heartbeat: msgs.HeartbeatMsg{
+			ServiceTreeID: c.serviceTreeID,
+			AuditVersion:  version.Semantic,
+			OsVersion:     c.kver,
+			Language:      runtime.Version(),
+			Destination:   t.String(),
+		},
+	}
 }
 
 // Notify returns a channel that will receive errors when the connection to the remote audit server is broken or

@@ -170,6 +170,22 @@ func (m *msgSender) write(msg msgs.Msg) error {
 		m.client.sendNotify(err)
 		return err
 	}
+	// A no-op connection drops everything it is given, so the message is counted as dropped
+	// rather than sent. This happens while WithDeferredConnection() is serving with a no-op
+	// sender or when the client was created with a no-op connection.
+	if m.conn.Type() == conn.TypeNoOP {
+		switch msg.Type {
+		case msgs.DataPlane, msgs.ControlPlane:
+			m.client.metrics.msgsDropped.Add(ctx, 1)
+		case msgs.Heartbeat:
+			m.client.metrics.heartbeatDropped.Add(ctx, 1)
+		case msgs.Diagnostic:
+			m.client.metrics.diagnosticDropped.Add(ctx, 1)
+		default:
+			context.Log(ctx).Error(fmt.Sprintf("unknown message type %v, cannot categorize drop metrics", msg.Type))
+		}
+		return nil
+	}
 	m.client.metrics.msgsSent.Add(ctx, 1)
 	return nil
 }

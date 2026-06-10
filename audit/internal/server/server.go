@@ -1,6 +1,7 @@
 /*
 Package server implements a generic audit server that can accept the audit messages from the client.
-This is used exclusively to test the audit client's various conn implementations.
+This is used exclusively in tests, such as testing the audit client's various conn implementations
+and end to end scenarios.
 
 Here's an example of retrieving the messages from the server running on a unix socket:
 
@@ -58,7 +59,8 @@ func msgFromWrap(a []any) msgs.Record {
 	return msg
 }
 
-// AuditRecordTest is a generic AuditRecordTest that accepts connections and reads messages from them, outputting them to a channel.
+// AuditRecordTest is a generic AuditRecordTest that accepts connections and reads messages from them,
+// outputting them to a channel.
 type AuditRecordTest struct {
 	connType string
 	addr     string
