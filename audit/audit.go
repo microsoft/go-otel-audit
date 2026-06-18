@@ -247,6 +247,9 @@ func (c *Client) startConnManager() error {
 		if !c.deferredConn {
 			return fmt.Errorf("failed to create message sender: %w", err)
 		}
+		if errors.Is(err, exponential.ErrPermanent) {
+			return fmt.Errorf("%w: %w", err, ErrClientDead)
+		}
 		return c.startDeferred()
 	}
 	return c.launchManager(sender)
@@ -401,7 +404,7 @@ func (c *Client) newSender() (*msgSender, error) {
 	if c.goos != "linux" && !testing.Testing() {
 		if auditConn.Type() != conn.TypeNoOP {
 			c.closeAuditConn(auditConn)
-			return nil, fmt.Errorf("audit: only linux clients can use Audit with a non-NoOp conn.Audit type")
+			return nil, fmt.Errorf("audit: only linux clients can use Audit with a non-NoOp conn.Audit type: %w", exponential.ErrPermanent)
 		}
 	}
 
