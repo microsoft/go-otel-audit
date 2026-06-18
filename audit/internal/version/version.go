@@ -2,4 +2,4 @@
 package version
 
 // Semantic is the version of the audit package. Will be in the form of v.0.0.1 .
-const Semantic = "v.2.0.0"
+const Semantic = "v.1.1.0"

@@ -216,9 +216,17 @@ func TestManageSender(t *testing.T) {
 type fakeMsgSender struct {
 	startErrs []error
 	callCount int
+
+	// started, if non-nil, is closed the first time start() is called. This lets a test
+	// observe that a sender was handed off to manageSender.
+	started chan struct{}
 }
 
 func (f *fakeMsgSender) start(ctx context.Context) <-chan error {
+	if f.started != nil {
+		close(f.started)
+		f.started = nil
+	}
 	ch := make(chan error, 1)
 	if f.callCount < len(f.startErrs) {
 		ch <- f.startErrs[f.callCount]
@@ -337,7 +345,7 @@ func TestNewSender(t *testing.T) {
 			Destination:   test.connType.String(),
 		}
 
-		s := sender.(*msgSender)
+		s := sender
 
 		if diff := pretty.Compare(wantHB, s.heartbeat.Heartbeat); diff != "" {
 			t.Errorf("TestNewSender(%s): heartbeat mismatch (-want +got):\n%s", test.name, diff)
@@ -347,6 +355,167 @@ func TestNewSender(t *testing.T) {
 			t.Errorf("TestNewSender(%s): conn type mismatch: got %s, want %s", test.name, s.conn.Type(), test.connType)
 		}
 	}
+}
+
+func TestStartConnManager(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		deferred bool
+		// connectFails is the number of newSender() calls that fail with a retryable error before the
+		// final sender, which succeeds unless wantDead is set, in which case it is a permanent error.
+		// startConnManager() makes the first call; the rest happen during the deferred reconnect.
+		connectFails int
+		wantErr      bool
+		wantStarted  bool
+		wantDead     bool
+	}{
+		{
+			name:        "Success: initial connection succeeds",
+			wantStarted: true,
+		},
+		{
+			name:         "Error: initial connection fails without deferred connection",
+			connectFails: 1,
+			wantErr:      true,
+		},
+		{
+			name:         "Success: deferred connection serves no-op then upgrades to a real connection",
+			deferred:     true,
+			connectFails: 2,
+			wantStarted:  true,
+		},
+		{
+			name:         "Success: deferred connection dies when reconnect hits a permanent error",
+			deferred:     true,
+			connectFails: 1,
+			wantDead:     true,
+		},
+	}
+
+	for _, test := range tests {
+		back, err := exponential.New(
+			exponential.WithPolicy(
+				exponential.Policy{
+					InitialInterval:     1 * time.Millisecond,
+					Multiplier:          1.1,
+					RandomizationFactor: 0.1,
+					MaxInterval:         10 * time.Millisecond,
+				},
+			),
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		started := make(chan struct{})
+		senders := make([]newSenderResp, 0, test.connectFails+1)
+		for i := 0; i < test.connectFails; i++ {
+			senders = append(senders, newSenderResp{err: errors.New("connection failed")})
+		}
+		if test.wantDead {
+			senders = append(senders, newSenderResp{err: exponential.ErrPermanent})
+		} else {
+			senders = append(senders, newSenderResp{sender: &fakeMsgSender{started: started}})
+		}
+
+		client := &Client{
+			serviceTreeID:       "e6c9fcb1-7f08-4c1d-9e7a-123456789abc",
+			kver:                "test-kernel",
+			goos:                "linux",
+			deferredConn:        test.deferred,
+			notifier:            make(chan NotifyError, 100),
+			closers:             &sync.Group{},
+			maxClosers:          3,
+			sendCh:              make(chan msgs.Msg, 1),
+			metrics:             mustNewMetrics(),
+			manageSenderBackoff: back,
+			log:                 slog.Default(),
+			testContext:         ctx,
+			testParams:          &testParams{senders: senders},
+		}
+
+		err = client.startConnManager()
+		switch {
+		case err == nil && test.wantErr:
+			t.Errorf("TestStartConnManager(%s): got err == nil, want err != nil", test.name)
+			continue
+		case err != nil && !test.wantErr:
+			t.Errorf("TestStartConnManager(%s): got err == %s, want err == nil", test.name, err)
+			continue
+		case err != nil:
+			continue
+		}
+
+		if test.wantStarted {
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Errorf("TestStartConnManager(%s): the real connection sender was never started", test.name)
+			}
+		}
+
+		if test.wantDead {
+			dead := false
+			deadline := time.After(5 * time.Second)
+			for !dead {
+				select {
+				case <-deadline:
+					t.Errorf("TestStartConnManager(%s): got clientDead == false, want clientDead == true", test.name)
+					dead = true
+				case <-time.After(time.Millisecond):
+					dead = client.clientDead.Load()
+				}
+			}
+		}
+	}
+}
+
+func TestNewNoopSender(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client := &Client{
+		serviceTreeID: "e6c9fcb1-7f08-4c1d-9e7a-123456789abc",
+		kver:          "test-kernel",
+		goos:          "linux",
+		notifier:      make(chan NotifyError, 1),
+		sendCh:        make(chan msgs.Msg, 1),
+		metrics:       mustNewMetrics(),
+		log:           slog.Default(),
+	}
+
+	sender, err := client.newNoopSender()
+	if err != nil {
+		t.Fatalf("TestNewNoopSender: got err == %s, want err == nil", err)
+	}
+
+	s := sender
+	if s.conn.Type() != conn.TypeNoOP {
+		t.Fatalf("TestNewNoopSender: got conn type %s, want %s", s.conn.Type(), conn.TypeNoOP)
+	}
+
+	// The no-op sender should drain messages so the client responds while connecting.
+	errCh := sender.start(ctx)
+	client.sendCh <- msgs.Msg{Type: msgs.DataPlane, Record: validRecord.Clone()}
+
+	deadline := time.After(5 * time.Second)
+	for len(client.sendCh) > 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("TestNewNoopSender: no-op sender did not drain the send channel")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	cancel()
+	<-errCh
 }
 
 func TestSendNotify(t *testing.T) {

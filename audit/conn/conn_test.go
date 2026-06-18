@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microsoft/go-otel-audit/audit/conn/internal/server"
+	"github.com/microsoft/go-otel-audit/audit/internal/server"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
 
 	"github.com/kylelemons/godebug/pretty"
