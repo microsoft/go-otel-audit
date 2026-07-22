@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"strings"
@@ -89,7 +90,7 @@ func TestSend(t *testing.T) {
 		case !test.err && err != nil:
 			t.Errorf("Expected no error, but got error: %v", err)
 		case err != nil:
-			return
+			continue
 		}
 	}
 }
@@ -104,7 +105,6 @@ func TestManageSender(t *testing.T) {
 		backgroundClosers int
 		wantDead          bool
 		wantNotifications int
-		permErr           bool
 	}{
 		{
 			name:              "success",
@@ -126,16 +126,16 @@ func TestManageSender(t *testing.T) {
 			newSenderResps:    []newSenderResp{{err: exponential.ErrPermanent}},
 			wantDead:          true,
 			wantNotifications: 3,
-			permErr:           true,
 		},
 		{
-			name:              "sender error, fails permanently due to due many closers open",
+			// The sender here would succeed. Only backgroundClosers exceeding maxClosers makes this fail,
+			// which is what proves the closers guard runs before we ever try to connect.
+			name:              "sender error, fails permanently because too many closers are open",
 			backgroundClosers: 4,
 			senderErrs:        []error{errors.New("connection error")},
-			newSenderResps:    []newSenderResp{{err: exponential.ErrPermanent}},
+			newSenderResps:    []newSenderResp{{sender: &fakeMsgSender{}}},
 			wantDead:          true,
 			wantNotifications: 2,
-			permErr:           true,
 		},
 	}
 
@@ -193,11 +193,6 @@ func TestManageSender(t *testing.T) {
 			close(done)
 		}()
 
-		if test.permErr {
-			time.Sleep(1 * time.Second)
-			cancel()
-		}
-
 		<-done
 
 		if client.clientDead.Load() != test.wantDead {
@@ -238,6 +233,158 @@ func (f *fakeMsgSender) start(ctx context.Context) <-chan error {
 	return ch
 }
 
+// TestReconnect checks that when the backoff gives up, the final notification we send the user carries the
+// error that actually caused the failure. A previous version reported every permanent failure as "too many
+// closers running", which hid other causes such as a non-linux host using a non-NoOp connection.
+func TestReconnect(t *testing.T) {
+	t.Parallel()
+
+	// errBoom stands in for a permanent failure that is not the too-many-closers case.
+	errBoom := fmt.Errorf("boom: %w", exponential.ErrPermanent)
+
+	tests := []struct {
+		name              string
+		senders           []newSenderResp
+		backgroundClosers int
+		// cancelCtx aborts the retry by handing reconnect an already cancelled context, which is the
+		// non-permanent way the backoff can give up.
+		cancelCtx bool
+
+		wantSender bool
+		wantDead   bool
+		// wantNotifications is how many notifications reconnect must send. reconnect notifies once per
+		// failed connection attempt and once more when it gives up, so counting them is what pins the
+		// giving-up notification: asserting only on the last one passes even if that notification is
+		// never sent, because a per-attempt notification wraps the same error.
+		wantNotifications int
+		// wantErrIs, when set, must be wrapped by the last notification reconnect sends.
+		wantErrIs error
+	}{
+		// This row is the baseline the others deviate from: one sender that connects, no closers backed up,
+		// no cancellation.
+		{
+			name:              "Success: the first connection attempt succeeds",
+			senders:           []newSenderResp{{sender: &fakeMsgSender{}}},
+			wantSender:        true,
+			wantNotifications: 0,
+		},
+		{
+			name:              "Success: a retryable failure is retried until a sender is created",
+			senders:           []newSenderResp{{err: errors.New("connection refused")}, {sender: &fakeMsgSender{}}},
+			wantSender:        true,
+			wantNotifications: 1,
+		},
+		{
+			name:              "Error: a permanent failure reports the cause that produced it",
+			senders:           []newSenderResp{{err: errBoom}},
+			wantDead:          true,
+			wantNotifications: 2,
+			wantErrIs:         errBoom,
+		},
+		{
+			// Deviates from the baseline only in backgroundClosers. The sender it would get still connects,
+			// so if the closers guard did not run first this row would succeed and fail the assertions.
+			name:              "Error: too many closers running reports the closers cause",
+			senders:           []newSenderResp{{sender: &fakeMsgSender{}}},
+			backgroundClosers: 4,
+			wantDead:          true,
+			wantNotifications: 1,
+			wantErrIs:         errTooManyClosers,
+		},
+		{
+			// cancelCtx and the failing sender are coupled: the backoff runs the operation once before it
+			// honors the cancelled context, so a sender that connects would return before any abort.
+			name:              "Error: a cancelled context aborts the retry and reports the cancellation",
+			senders:           []newSenderResp{{err: errors.New("connection refused")}},
+			cancelCtx:         true,
+			wantDead:          true,
+			wantNotifications: 2,
+			// The backoff substitutes ErrRetryCanceled for context.Canceled, so that is the sentinel a
+			// Notify consumer can actually match on.
+			wantErrIs: exponential.ErrRetryCanceled,
+		},
+	}
+
+	for _, test := range tests {
+		policy := exponential.Policy{
+			InitialInterval:     1 * time.Millisecond,
+			Multiplier:          1.1,
+			RandomizationFactor: 0.1,
+			MaxInterval:         10 * time.Millisecond,
+		}
+		back, err := exponential.New(exponential.WithPolicy(policy))
+		if err != nil {
+			panic(err)
+		}
+
+		client := &Client{
+			notifier:            make(chan NotifyError, 100),
+			closers:             &sync.Group{},
+			maxClosers:          3,
+			sendCh:              make(chan msgs.Msg, 1),
+			metrics:             mustNewMetrics(),
+			manageSenderBackoff: back,
+			log:                 slog.Default(),
+			testParams:          &testParams{senders: test.senders},
+		}
+
+		if test.cancelCtx {
+			cancelled, cancel := context.WithCancel(t.Context())
+			cancel()
+			client.testContext = cancelled
+		}
+
+		// Group.Go increments Running() synchronously, so the closers are counted by the time reconnect runs.
+		closeMe := make(chan struct{})
+		for i := 0; i < test.backgroundClosers; i++ {
+			client.closers.Go(t.Context(), func(ctx context.Context) error {
+				<-closeMe
+				return nil
+			})
+		}
+		defer close(closeMe)
+
+		sender := client.reconnect()
+
+		switch {
+		case (sender != nil) != test.wantSender:
+			t.Errorf("TestReconnect(%s): got sender != nil == %v, want %v", test.name, sender != nil, test.wantSender)
+			continue
+		case client.clientDead.Load() != test.wantDead:
+			t.Errorf("TestReconnect(%s): got clientDead == %v, want %v", test.name, client.clientDead.Load(), test.wantDead)
+			continue
+		}
+
+		// reconnect has returned, so it is the only writer and it is done. Read exactly what it queued
+		// rather than closing the channel, since sendNotify writing to a closed channel would panic even
+		// though it sends inside a select.
+		n := len(client.notifier)
+		notices := make([]error, 0, n)
+		for i := 0; i < n; i++ {
+			notices = append(notices, (<-client.notifier).Err)
+		}
+
+		if len(notices) != test.wantNotifications {
+			t.Errorf("TestReconnect(%s): got %d notifications, want %d", test.name, len(notices), test.wantNotifications)
+			continue
+		}
+		if test.wantErrIs == nil {
+			continue
+		}
+		if len(notices) == 0 {
+			t.Errorf("TestReconnect(%s): got 0 notifications, want the failure to be reported", test.name)
+			continue
+		}
+
+		// The failure that stops the connection manager is the last thing reconnect notifies on. Earlier
+		// notifications come from the individual connection attempts.
+		last := notices[len(notices)-1]
+		if !errors.Is(last, test.wantErrIs) {
+			t.Errorf("TestReconnect(%s): got final notification err == %v, want it to wrap %v", test.name, last, test.wantErrIs)
+		}
+	}
+}
+
 func TestNewSender(t *testing.T) {
 	t.Parallel()
 
@@ -249,6 +396,9 @@ func TestNewSender(t *testing.T) {
 		sendCh    chan msgs.Msg
 
 		wantErr bool
+		// wantPermanent is whether the returned error must wrap exponential.ErrPermanent. A retryable
+		// failure must not, or reconnect would give up and mark the client dead on a recoverable error.
+		wantPermanent bool
 	}{
 		{
 			name:      "connection creation fails",
@@ -282,10 +432,11 @@ func TestNewSender(t *testing.T) {
 			sendCh:   make(chan msgs.Msg, 1),
 		},
 		{
-			name:     "newMsgSender() errors because Client has a nil send channel",
-			goos:     "linux",
-			connType: conn.TypeDomainSocket,
-			wantErr:  true,
+			name:          "newMsgSender() errors because Client has a nil send channel",
+			goos:          "linux",
+			connType:      conn.TypeDomainSocket,
+			wantErr:       true,
+			wantPermanent: true,
 		},
 	}
 
@@ -318,6 +469,9 @@ func TestNewSender(t *testing.T) {
 			t.Errorf("TestNewSender(%s): got err == %v, want err == nil", test.name, err)
 			continue
 		case err != nil:
+			if got := errors.Is(err, exponential.ErrPermanent); got != test.wantPermanent {
+				t.Errorf("TestNewSender(%s): got errors.Is(err, ErrPermanent) == %v, want %v (err == %v)", test.name, got, test.wantPermanent, err)
+			}
 			if client.goos != "linux" && test.connType != conn.TypeNoOP {
 				client.closers.Wait(t.Context())
 				select {
@@ -367,9 +521,14 @@ func TestStartConnManager(t *testing.T) {
 		// final sender, which succeeds unless wantDead is set, in which case it is a permanent error.
 		// startConnManager() makes the first call; the rest happen during the deferred reconnect.
 		connectFails int
-		wantErr      bool
-		wantStarted  bool
-		wantDead     bool
+		// initialPermanent makes the very first newSender() call fail with a permanent error, which is the
+		// one failure deferred mode cannot defer because retrying it could never succeed.
+		initialPermanent bool
+		wantErr          bool
+		wantStarted      bool
+		wantDead         bool
+		// wantErrIs, when set, must be wrapped by the error startConnManager returns.
+		wantErrIs error
 	}{
 		{
 			name:        "Success: initial connection succeeds",
@@ -387,10 +546,17 @@ func TestStartConnManager(t *testing.T) {
 			wantStarted:  true,
 		},
 		{
-			name:         "Success: deferred connection dies when reconnect hits a permanent error",
+			name:         "Error: deferred connection dies when reconnect hits a permanent error",
 			deferred:     true,
 			connectFails: 1,
 			wantDead:     true,
+		},
+		{
+			name:             "Error: deferred connection is refused when the initial failure is permanent",
+			deferred:         true,
+			initialPermanent: true,
+			wantErr:          true,
+			wantErrIs:        ErrClientDead,
 		},
 	}
 
@@ -414,12 +580,18 @@ func TestStartConnManager(t *testing.T) {
 
 		started := make(chan struct{})
 		senders := make([]newSenderResp, 0, test.connectFails+1)
-		for i := 0; i < test.connectFails; i++ {
-			senders = append(senders, newSenderResp{err: errors.New("connection failed")})
-		}
-		if test.wantDead {
-			senders = append(senders, newSenderResp{err: exponential.ErrPermanent})
-		} else {
+		switch {
+		// A permanent initial failure is the only call startConnManager makes: it refuses to defer.
+		case test.initialPermanent:
+			senders = append(senders, newSenderResp{err: fmt.Errorf("connection can never succeed: %w", exponential.ErrPermanent)})
+		default:
+			for i := 0; i < test.connectFails; i++ {
+				senders = append(senders, newSenderResp{err: errors.New("connection failed")})
+			}
+			if test.wantDead {
+				senders = append(senders, newSenderResp{err: exponential.ErrPermanent})
+				break
+			}
 			senders = append(senders, newSenderResp{sender: &fakeMsgSender{started: started}})
 		}
 
@@ -448,6 +620,9 @@ func TestStartConnManager(t *testing.T) {
 			t.Errorf("TestStartConnManager(%s): got err == %s, want err == nil", test.name, err)
 			continue
 		case err != nil:
+			if test.wantErrIs != nil && !errors.Is(err, test.wantErrIs) {
+				t.Errorf("TestStartConnManager(%s): got err == %v, want it to wrap %v", test.name, err, test.wantErrIs)
+			}
 			continue
 		}
 

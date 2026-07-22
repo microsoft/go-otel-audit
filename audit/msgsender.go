@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/retry/exponential"
 	"github.com/gostdlib/base/context"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
@@ -53,7 +54,11 @@ func (m msgSenderArgs) validate() error {
 // newMsgSender creates a new message sender for the audit client.
 func newMsgSender(args msgSenderArgs) (*msgSender, error) {
 	if err := args.validate(); err != nil {
-		return nil, fmt.Errorf("invalid msgSenderArgs: %w", err)
+		// validate() only checks static wiring: a nil conn, client, notifier, send channel or metrics.
+		// Retrying that can never succeed, so mark it permanent to keep reconnect from backing off
+		// forever on a bug we cannot recover from. Marking it here rather than at the call sites keeps
+		// newSender and newNoopSender classifying the same failure the same way.
+		return nil, fmt.Errorf("invalid msgSenderArgs: %w: %w", err, exponential.ErrPermanent)
 	}
 
 	return &msgSender{
@@ -67,15 +72,24 @@ func newMsgSender(args msgSenderArgs) (*msgSender, error) {
 // If the channel returns an error that is nil, it means the caller stopped the sender.
 func (m *msgSender) start(ctx context.Context) <-chan error {
 	ch := make(chan error, 1)
-	go func() {
-		defer close(ch)
-		if err := m.sender(ctx); err != nil {
-			select {
-			case ch <- err:
-			default:
+	err := context.Tasks(ctx).Once(
+		ctx,
+		"msgSender",
+		func(ctx context.Context) error {
+			defer close(ch)
+			if err := m.sender(ctx); err != nil {
+				select {
+				case ch <- err:
+				default:
+				}
 			}
-		}
-	}()
+			return nil
+		},
+	)
+	if err != nil {
+		ch <- err
+		close(ch)
+	}
 	return ch
 }
 
@@ -167,7 +181,7 @@ func (m *msgSender) write(msg msgs.Msg) error {
 		default:
 			context.Log(ctx).Error(fmt.Sprintf("unknown message type %v, cannot categorize error metrics", msg.Type))
 		}
-		m.client.sendNotify(err)
+		m.client.sendNotify(fmt.Errorf("audit.Client write failed: %w", err))
 		return err
 	}
 	// A no-op connection drops everything it is given, so the message is counted as dropped

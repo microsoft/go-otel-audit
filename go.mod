@@ -1,18 +1,18 @@
 module github.com/microsoft/go-otel-audit
 
-go 1.25.0
+go 1.26.4
 
 require (
 	github.com/go-json-experiment/json v0.0.0-20250725192818-e39067aee2d2
 	github.com/google/uuid v1.6.0
-	github.com/gostdlib/base v0.0.0-20260226191444-dcf0f05f9752
+	github.com/gostdlib/base v0.0.0-20260713182956-dddb0d62a7e9
 	github.com/kylelemons/godebug v1.1.0
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v4 v4.3.13
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	golang.org/x/exp v0.0.0-20250606033433-dcc06ee1d476
-	golang.org/x/sys v0.42.0
+	golang.org/x/sys v0.46.0
 )
 
 require (
@@ -77,10 +77,10 @@ require (
 	go.opentelemetry.io/proto/otlp v1.7.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.48.0 // indirect
+	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/term v0.38.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
@@ -102,7 +102,7 @@ require (
 )
 
 require (
-	github.com/Azure/retry v0.0.0-20250701224816-85c6a88f883d
+	github.com/Azure/retry v0.0.0-20260629192600-3a6893b45f6d
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/vmihailenco/tagparser v0.1.2 // indirect
 	google.golang.org/appengine v1.6.8 // indirect

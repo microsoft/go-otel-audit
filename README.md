@@ -39,6 +39,10 @@ cc := func() (conn.Audit, error) {
 // with drops recorded in the drop metrics) while it retries the connection in the background,
 // then sends normally once connected. Omit this option if you want New() to return an error
 // when the initial connection fails.
+//
+// This only defers failures a retry could fix. A failure that can never succeed, such as a
+// non-NoOp connection on a non-linux host, is permanent and still fails New() with an error
+// wrapping audit.ErrClientDead.
 c, err := audit.New(ctx, serviceTreeID, cc, audit.WithDeferredConnection())
 if err != nil {
 	// Handle error.
