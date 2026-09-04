@@ -7,6 +7,7 @@ import (
 
 	"github.com/Azure/retry/exponential"
 	"github.com/gostdlib/base/context"
+	"github.com/gostdlib/base/values/chans"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
 )
@@ -78,10 +79,7 @@ func (m *msgSender) start(ctx context.Context) <-chan error {
 		func(ctx context.Context) error {
 			defer close(ch)
 			if err := m.sender(ctx); err != nil {
-				select {
-				case ch <- err:
-				default:
-				}
+				chans.TryPut(ch, err)
 			}
 			return nil
 		},

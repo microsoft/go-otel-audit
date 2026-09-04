@@ -56,6 +56,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gostdlib/base/concurrency/sync"
 	"github.com/gostdlib/base/context"
+	"github.com/gostdlib/base/values/chans"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/internal/version"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
@@ -127,9 +128,8 @@ type Client struct {
 	maxClosers int
 
 	// notifier is the channel that will receive errors when the connection to the remote audit server is broken or
-	// the queue is full. If this channel is full, the error will be dropped. It buffers two errors because a
-	// failed reconnect reports twice: once for the attempt that failed and once when it gives up. With a buffer
-	// of one, a consumer that is not actively draining would only ever see the first and lose the reason we quit.
+	// the queue is full. If this channel is full, the error will be dropped, except for the notice that the client
+	// has died, which evicts the oldest entry instead. See sendNotify and sendNotifyDead.
 	notifier chan NotifyError
 
 	// clientDead indicates the client is dead and will not recover. This is set to true when the
@@ -223,11 +223,15 @@ func New(ctx context.Context, serviceTreeID uuid.UUID, create CreateConn, option
 	}
 
 	c := &Client{
-		serviceTreeID:       serviceTreeID.String(),
-		kver:                kver,
-		goos:                runtime.GOOS,
-		queueSize:           DefaultQueueSize,
-		create:              create,
+		serviceTreeID: serviceTreeID.String(),
+		kver:          kver,
+		goos:          runtime.GOOS,
+		queueSize:     DefaultQueueSize,
+		create:        create,
+		// It buffers two errors so a consumer that is not actively draining still sees a little
+		// history. Connection errors are dropped once it is full, as documented on Notify(). The
+		// notification that the client has died is not: sendNotifyDead evicts the oldest entry to
+		// make room, because that error is the only place the reason we quit is reported.
 		notifier:            make(chan NotifyError, 2),
 		closers:             &g,
 		maxClosers:          1000,
@@ -398,7 +402,7 @@ func (c *Client) reconnect() msgSenderer {
 		},
 	)
 	if err != nil {
-		c.sendNotify(fmt.Errorf("audit.Client connection error: stopping connection manager: %w", err))
+		c.sendNotifyDead(fmt.Errorf("audit.Client connection error: stopping connection manager: %w", err))
 		c.clientDead.Store(true)
 		return nil
 	}
@@ -480,7 +484,9 @@ func (c *Client) heartbeat(t conn.Type) msgs.Msg {
 }
 
 // Notify returns a channel that will receive errors when the connection to the remote audit server is broken or
-// the queue is full. If this channel is full, the error will be dropped.
+// the queue is full. If this channel is full, the error will be dropped. The one exception is the error reporting
+// that the client has died and will not reconnect, which displaces the oldest queued error rather than being
+// dropped, so a consumer that reads the channel only after Send returns ErrClientDead can still find out why.
 func (c *Client) Notify() <-chan NotifyError {
 	return c.notifier
 }
@@ -514,31 +520,68 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) 
 		return fmt.Errorf("%w: %w", err, ErrValidation)
 	}
 
-	select {
-	case c.sendCh <- msg:
-	default:
+	if !chans.TryPut(c.sendCh, msg) {
 		return ErrQueueFull
 	}
+
 	return nil
 }
 
 // sendNotify sends a notification to the notifier channel. If the channel is full, the notification is dropped.
 func (c *Client) sendNotify(err error) {
-	if c.notifier == nil || err == nil {
+	notice, ok := c.notice(err)
+	if !ok {
 		return
 	}
 
-	notice := NotifyError{
-		Err:  err,
-		Time: time.Now().UTC(),
+	if !chans.TryPut(c.notifier, notice) {
+		c.logDrop(err)
+	}
+}
+
+// sendNotifyDead sends the notification that the client has died and will not reconnect. Unlike sendNotify,
+// it does not drop the notification when the channel is full: it evicts the oldest notification to make room
+// and retries until it lands. A dying client has usually just filled the channel with the connection errors
+// that led here, and this error is the only report of why we stopped, since Send only returns a bare
+// ErrClientDead.
+//
+// The retry cannot spin forever. A channel with no buffer can never make room, so it is handled before the
+// loop. Otherwise every producer that takes the slot we just freed is a sendNotify call that then returns:
+// by the time we are called reconnect has given up, so the only producers left are the closeAuditConn
+// goroutines, which notify at most once each and are no longer being created.
+func (c *Client) sendNotifyDead(err error) {
+	notice, ok := c.notice(err)
+	if !ok {
+		return
 	}
 
-	select {
-	case c.notifier <- notice:
-	default:
-		if c.log != nil {
-			c.log.Error("audit.Client notifier channel is full, dropping notification", slog.Any("error", err))
+	if cap(c.notifier) == 0 {
+		c.logDrop(err)
+		return
+	}
+
+	for !chans.TryPut(c.notifier, notice) {
+		// Closed ignored, as TryPut() would have paniced.
+		evicted, ok, _ := chans.TryGet((<-chan NotifyError)(c.notifier))
+		if ok && c.log != nil {
+			c.log.Error("audit.Client notifier channel is full, evicting notification for the client death notice", slog.Any("error", evicted.Err))
 		}
+	}
+}
+
+// notice wraps err in a NotifyError. ok is false if there is nothing to send, either because the client has
+// no notifier or because err is nil.
+func (c *Client) notice(err error) (notice NotifyError, ok bool) {
+	if c.notifier == nil || err == nil {
+		return NotifyError{}, false
+	}
+	return NotifyError{Err: err, Time: time.Now().UTC()}, true
+}
+
+// logDrop logs that err could not be delivered on the notifier channel.
+func (c *Client) logDrop(err error) {
+	if c.log != nil {
+		c.log.Error("audit.Client notifier channel is full, dropping notification", slog.Any("error", err))
 	}
 }
 

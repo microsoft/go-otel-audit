@@ -13,6 +13,7 @@ import (
 
 	"github.com/Azure/retry/exponential"
 	"github.com/gostdlib/base/concurrency/sync"
+	"github.com/gostdlib/base/values/chans"
 	"github.com/kylelemons/godebug/pretty"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/internal/version"
@@ -250,12 +251,18 @@ func TestReconnect(t *testing.T) {
 		// non-permanent way the backoff can give up.
 		cancelCtx bool
 
+		// notifierSize is the buffer the notifier channel is given. It defaults to more room than any
+		// row needs, so a row only sets it to reproduce a consumer that is not draining a real client's
+		// channel, whose buffer is much smaller than the number of notifications a reconnect can produce.
+		notifierSize int
+
 		wantSender bool
 		wantDead   bool
-		// wantNotifications is how many notifications reconnect must send. reconnect notifies once per
-		// failed connection attempt and once more when it gives up, so counting them is what pins the
-		// giving-up notification: asserting only on the last one passes even if that notification is
-		// never sent, because a per-attempt notification wraps the same error.
+		// wantNotifications is how many notifications must be readable from the notifier once reconnect
+		// returns. reconnect notifies once per failed connection attempt and once more when it gives up,
+		// so counting them is what pins the giving-up notification: asserting only on the last one passes
+		// even if that notification is never sent, because a per-attempt notification wraps the same error.
+		// When notifierSize is smaller than the number of notifications sent, this is what survived.
 		wantNotifications int
 		// wantErrIs, when set, must be wrapped by the last notification reconnect sends.
 		wantErrIs error
@@ -292,6 +299,25 @@ func TestReconnect(t *testing.T) {
 			wantErrIs:         errTooManyClosers,
 		},
 		{
+			// Regression: the notification that reconnect is giving up used to be dropped whenever the
+			// notifier was already full, which is the normal state of a dying client whose owner reads
+			// Notify only after Send starts returning ErrClientDead. The two failing attempts fill a real
+			// client's buffer, the permanent attempt's own notification is dropped, and the giving-up
+			// notification has to displace the oldest to survive. The retryable attempts fail with an
+			// error that does not wrap errBoom, so wantErrIs cannot be satisfied by a leftover attempt
+			// notification.
+			name: "Error: the giving-up notification survives a notifier that is already full",
+			senders: []newSenderResp{
+				{err: errors.New("connection refused")},
+				{err: errors.New("connection refused")},
+				{err: errBoom},
+			},
+			notifierSize:      2,
+			wantDead:          true,
+			wantNotifications: 2,
+			wantErrIs:         errBoom,
+		},
+		{
 			// cancelCtx and the failing sender are coupled: the backoff runs the operation once before it
 			// honors the cancelled context, so a sender that connects would return before any abort.
 			name:              "Error: a cancelled context aborts the retry and reports the cancellation",
@@ -317,8 +343,13 @@ func TestReconnect(t *testing.T) {
 			panic(err)
 		}
 
+		notifierSize := test.notifierSize
+		if notifierSize == 0 {
+			notifierSize = 100
+		}
+
 		client := &Client{
-			notifier:            make(chan NotifyError, 100),
+			notifier:            make(chan NotifyError, notifierSize),
 			closers:             &sync.Group{},
 			maxClosers:          3,
 			sendCh:              make(chan msgs.Msg, 1),
@@ -522,7 +553,11 @@ func TestStartConnManager(t *testing.T) {
 		// startConnManager() makes the first call; the rest happen during the deferred reconnect.
 		connectFails int
 		// initialPermanent makes the very first newSender() call fail with a permanent error, which is the
-		// one failure deferred mode cannot defer because retrying it could never succeed.
+		// one failure deferred mode cannot defer because retrying it could never succeed. In production that
+		// is a non-linux host handed a real connection: newSender rejects any non-NoOp conn off linux, and
+		// deferring that would return a client that silently drops every record while retrying a platform it
+		// can never reach. The error is injected through testParams rather than by setting goos because that
+		// check is gated on !testing.Testing() and so never fires under go test.
 		initialPermanent bool
 		wantErr          bool
 		wantStarted      bool
@@ -727,6 +762,82 @@ func TestSendNotify(t *testing.T) {
 	case <-client.notifier:
 		t.Fatalf("TestSendNotify(sent NotifyError with error, but no room in queue): got NotifyError, expected message drop")
 	default:
+	}
+}
+
+func TestSendNotifyDead(t *testing.T) {
+	t.Parallel()
+
+	errOldest := errors.New("oldest")
+	errNewest := errors.New("newest")
+	errDead := errors.New("dead")
+
+	tests := []struct {
+		name     string
+		notifier chan NotifyError
+		prefill  []error
+		err      error
+		want     []error
+	}{
+		{
+			name:     "Success: a client with no notifier sends nothing",
+			notifier: nil,
+			err:      errDead,
+		},
+		{
+			name:     "Success: a nil error sends nothing",
+			notifier: make(chan NotifyError, 2),
+			err:      nil,
+		},
+		{
+			name:     "Success: a channel with room takes the notice",
+			notifier: make(chan NotifyError, 2),
+			err:      errDead,
+			want:     []error{errDead},
+		},
+		{
+			name:     "Success: a full channel evicts its oldest notice to make room",
+			notifier: make(chan NotifyError, 2),
+			prefill:  []error{errOldest, errNewest},
+			err:      errDead,
+			want:     []error{errNewest, errDead},
+		},
+		{
+			name:     "Success: an unbuffered channel with no reader drops the notice",
+			notifier: make(chan NotifyError),
+			err:      errDead,
+		},
+	}
+
+	for _, test := range tests {
+		client := Client{notifier: test.notifier, log: slog.Default()}
+		for _, err := range test.prefill {
+			client.notifier <- NotifyError{Err: err, Time: time.Now().UTC()}
+		}
+
+		client.sendNotifyDead(test.err)
+
+		got := []error{}
+		for {
+			notice, ok, _ := chans.TryGet((<-chan NotifyError)(client.notifier), chans.WithNoPanic())
+			if !ok {
+				break
+			}
+			if notice.Time.IsZero() {
+				t.Errorf("TestSendNotifyDead(%s): got NotifyError.Time zero, want non-zero", test.name)
+			}
+			got = append(got, notice.Err)
+		}
+
+		if len(got) != len(test.want) {
+			t.Errorf("TestSendNotifyDead(%s): got %d notices, want %d", test.name, len(got), len(test.want))
+			continue
+		}
+		for i, err := range got {
+			if err != test.want[i] {
+				t.Errorf("TestSendNotifyDead(%s): notice[%d]: got %v, want %v", test.name, i, err, test.want[i])
+			}
+		}
 	}
 }
 
