@@ -56,6 +56,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gostdlib/base/concurrency/sync"
 	"github.com/gostdlib/base/context"
+	"github.com/gostdlib/base/values/chans"
 	"github.com/microsoft/go-otel-audit/audit/conn"
 	"github.com/microsoft/go-otel-audit/audit/internal/version"
 	"github.com/microsoft/go-otel-audit/audit/msgs"
@@ -69,7 +70,7 @@ const DefaultQueueSize = 2048
 var (
 	// ErrValidation is an error that occurred during validation of an audit record.
 	// This means the audit record is invalid and was not sent.
-	ErrValidation = errors.New("validation error")
+	ErrValidation = fmt.Errorf("validation error: %w", exponential.ErrPermanent)
 	// ErrClientDead is an error that indicates the audit client is dead and will not recover.
 	// This is set when the connection manager detects that the connection is dead and hasn't been able to recover.
 	// This can be due to continuous send timeouts because the agent isn't listening, a bad file descriptor
@@ -80,6 +81,10 @@ var (
 	// requeued.
 	ErrQueueFull = errors.New("queue full")
 )
+
+// errTooManyClosers indicates we stopped reconnecting because too many conn.Audit objects are stuck in
+// CloseSend, which is our runaway goroutine guard. It is always wrapped with exponential.ErrPermanent.
+var errTooManyClosers = errors.New("too many closers running")
 
 // NotifyError is an error that is sent to the Notify channel when the connection to the remote audit server is broken.
 type NotifyError struct {
@@ -123,7 +128,8 @@ type Client struct {
 	maxClosers int
 
 	// notifier is the channel that will receive errors when the connection to the remote audit server is broken or
-	// the queue is full. If this channel is full, the error will be dropped.
+	// the queue is full. If this channel is full, the error will be dropped, except for the notice that the client
+	// has died, which evicts the oldest entry instead. See sendNotify and sendNotifyDead.
 	notifier chan NotifyError
 
 	// clientDead indicates the client is dead and will not recover. This is set to true when the
@@ -137,7 +143,9 @@ type Client struct {
 	log *slog.Logger
 
 	// deferredConn, when true, makes New() return a working client even if the initial connection
-	// to the remote audit server cannot be established. See WithDeferredConnection().
+	// to the remote audit server cannot be established. Defaults to false, which makes New() return an
+	// error on any initial connection failure. Even when true, a permanent failure still fails New().
+	// See WithDeferredConnection().
 	deferredConn bool
 
 	// below here are used for testing purposes only.
@@ -178,6 +186,11 @@ func WithLogger(l *slog.Logger) Option {
 // returned client responds as a no-op (messages are accepted and dropped, with drops recorded
 // in the drop metrics) while it retries the connection in the background with exponential
 // backoff. Once the connection succeeds, messages are sent normally.
+//
+// This only defers failures that a retry could fix. A failure that can never succeed, such as a
+// non-NoOp conn.Audit on a non-linux host or invalid sender wiring, is permanent: New() still
+// returns an error wrapping ErrClientDead instead of deferring, because no amount of retrying
+// would produce a working client.
 func WithDeferredConnection() Option {
 	return func(c *Client) error {
 		c.deferredConn = true
@@ -210,12 +223,16 @@ func New(ctx context.Context, serviceTreeID uuid.UUID, create CreateConn, option
 	}
 
 	c := &Client{
-		serviceTreeID:       serviceTreeID.String(),
-		kver:                kver,
-		goos:                runtime.GOOS,
-		queueSize:           DefaultQueueSize,
-		create:              create,
-		notifier:            make(chan NotifyError, 1),
+		serviceTreeID: serviceTreeID.String(),
+		kver:          kver,
+		goos:          runtime.GOOS,
+		queueSize:     DefaultQueueSize,
+		create:        create,
+		// It buffers two errors so a consumer that is not actively draining still sees a little
+		// history. Connection errors are dropped once it is full, as documented on Notify(). The
+		// notification that the client has died is not: sendNotifyDead evicts the oldest entry to
+		// make room, because that error is the only place the reason we quit is reported.
+		notifier:            make(chan NotifyError, 2),
 		closers:             &g,
 		maxClosers:          1000,
 		metrics:             m,
@@ -245,12 +262,12 @@ func (c *Client) startConnManager() error {
 	sender, err := c.createSender()
 	if err != nil {
 		if !c.deferredConn {
-			return fmt.Errorf("failed to create message sender: %w", err)
+			return err
 		}
 		if errors.Is(err, exponential.ErrPermanent) {
 			return fmt.Errorf("%w: %w", err, ErrClientDead)
 		}
-		return c.startDeferred()
+		return c.startDeferred(err)
 	}
 	return c.launchManager(sender)
 }
@@ -262,13 +279,10 @@ func (c *Client) launchManager(sender msgSenderer) error {
 		ctx = c.testContext
 	}
 
-	err := context.Tasks(ctx).Once(ctx, "manageSender", func(ctx context.Context) error {
+	_ = context.Tasks(ctx).Once(ctx, "manageSender", func(ctx context.Context) error {
 		c.manageSender(sender)
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("failed to start connection manager task: %w", err)
-	}
 	return nil
 }
 
@@ -276,10 +290,10 @@ func (c *Client) launchManager(sender msgSenderer) error {
 // messages with a no-op sender so the client responds immediately, while a background task retries the real
 // connection with exponential backoff. Once the real connection is established, the no-op sender is stopped
 // and the normal connection manager takes over.
-func (c *Client) startDeferred() error {
+func (c *Client) startDeferred(startErr error) error {
 	noop, err := c.newNoopSender()
 	if err != nil {
-		return fmt.Errorf("failed to create no-op sender: %w", err)
+		return fmt.Errorf("failed to create no-op sender (initial connection failed with: %w): %w", startErr, err)
 	}
 
 	ctx := context.Background()
@@ -289,14 +303,10 @@ func (c *Client) startDeferred() error {
 
 	noopCtx, cancelNoop := context.WithCancel(ctx)
 
-	err = context.Tasks(ctx).Once(ctx, "deferredConnect", func(ctx context.Context) error {
-		c.deferredConnect(noop, noopCtx, cancelNoop)
+	_ = context.Tasks(ctx).Once(ctx, "deferredConnect", func(ctx context.Context) error {
+		c.deferredConnect(noop, noopCtx, cancelNoop, startErr)
 		return nil
 	})
-	if err != nil {
-		cancelNoop()
-		return fmt.Errorf("failed to start deferred connection task: %w", err)
-	}
 	return nil
 }
 
@@ -305,7 +315,11 @@ func (c *Client) startDeferred() error {
 // it stops the no-op sender, waits for it to fully stop so it does not race the real sender on the send
 // channel, and hands off to manageSender. If reconnect reports the client is dead, it stops the no-op and
 // returns; Send will then return ErrClientDead.
-func (c *Client) deferredConnect(noop msgSenderer, noopCtx context.Context, cancelNoop context.CancelFunc) {
+func (c *Client) deferredConnect(noop msgSenderer, noopCtx context.Context, cancelNoop context.CancelFunc, startErr error) {
+	// Report the degraded start on Notify as well as the log. Every other connection error goes through
+	// sendNotify, so a user alerting off Notify would otherwise never learn the client came up dropping.
+	c.sendNotify(fmt.Errorf("audit.Client initial connection failed, deferring connection: %w", startErr))
+	c.log.Warn("audit.Client initial connection failed, starting deferred connection", slog.Any("error", startErr))
 	noopDone := noop.start(noopCtx)
 
 	sender := c.reconnect()
@@ -316,6 +330,7 @@ func (c *Client) deferredConnect(noop msgSenderer, noopCtx context.Context, canc
 	if sender == nil {
 		return
 	}
+	c.log.Info("audit.Client deferred connection established, switching to real sender")
 	c.manageSender(sender)
 }
 
@@ -340,18 +355,14 @@ func (c *Client) manageSender(sender msgSenderer) {
 		err := <-sender.start(ctx)
 		if err == nil {
 			if !testing.Testing() {
-				c.sendNotify(errors.New("bug: audit.Client connection looks to be closed by user, but we don't have a Close() method"))
+				c.sendNotify(fmt.Errorf("bug: audit.Client connection looks to be closed by user, but we don't have a Close() method: %w", ErrClientDead))
 			}
 			return
 		}
 		c.sendNotify(fmt.Errorf("audit.Client connection error: %w", err))
 
-		if c.closers.Running() > c.maxClosers {
-			c.sendNotify(errors.New("audit.Client connection error: too many closers running, stopping connection manager"))
-			c.clientDead.Store(true)
-			return
-		}
-
+		// The too many closers guard lives in reconnect, which checks it on its first attempt and reports
+		// the cause. Duplicating it here would report the same condition as a different, unclassified error.
 		sender = c.reconnect()
 		if sender == nil {
 			return
@@ -362,15 +373,24 @@ func (c *Client) manageSender(sender msgSenderer) {
 // reconnect makes a new sender using an exponential backoff that retries until it succeeds. It returns
 // the new sender, or nil if the client is now dead and should stop trying to connect. The client is
 // considered dead when the backoff returns any error: a permanent failure (too many conn closers running,
-// a runaway goroutine guard for the bad file descriptor case) or the retry being aborted (e.g. a cancelled
-// context). In every dead case clientDead is set so Send returns ErrClientDead rather than silently dropping.
+// a runaway goroutine guard for the bad file descriptor case, or a connection that can never work such as
+// a non-NoOp conn on a non-linux host) or the retry being aborted (e.g. a cancelled context). In every dead
+// case clientDead is set so Send returns ErrClientDead rather than silently dropping, and the error that
+// caused us to stop is sent to Notify so the user can tell these cases apart.
 func (c *Client) reconnect() msgSenderer {
+	// DO NOT use a passed context here that can be cancelled except in tests. We want to retry
+	// indefinitely until the client is dead, the same as manageSender.
+	ctx := context.Background()
+	if c.testContext != nil && testing.Testing() {
+		ctx = c.testContext
+	}
+
 	var sender msgSenderer
 	err := c.manageSenderBackoff.Retry(
-		context.Background(),
+		ctx,
 		func(ctx context.Context, r exponential.Record) error {
-			if c.closers.Running() > c.maxClosers {
-				return exponential.ErrPermanent
+			if running := c.closers.Running(); running > c.maxClosers {
+				return fmt.Errorf("%w (%d > %d): %w", errTooManyClosers, running, c.maxClosers, exponential.ErrPermanent)
 			}
 			var err error
 			sender, err = c.createSender()
@@ -382,12 +402,7 @@ func (c *Client) reconnect() msgSenderer {
 		},
 	)
 	if err != nil {
-		switch {
-		case errors.Is(err, exponential.ErrPermanent):
-			c.sendNotify(errors.New("audit.Client connection error: too many closers running, stopping connection manager"))
-		default:
-			c.sendNotify(fmt.Errorf("audit.Client connection error: reconnect aborted, stopping connection manager: %w", err))
-		}
+		c.sendNotifyDead(fmt.Errorf("audit.Client connection error: stopping connection manager: %w", err))
 		c.clientDead.Store(true)
 		return nil
 	}
@@ -417,6 +432,7 @@ func (c *Client) newSender() (*msgSender, error) {
 	)
 	if err != nil {
 		c.closeAuditConn(auditConn)
+		// newMsgSender already marks this permanent, as it can only fail on static wiring.
 		return nil, fmt.Errorf("failed to create message sender: %w", err)
 	}
 	return sender, nil
@@ -468,7 +484,9 @@ func (c *Client) heartbeat(t conn.Type) msgs.Msg {
 }
 
 // Notify returns a channel that will receive errors when the connection to the remote audit server is broken or
-// the queue is full. If this channel is full, the error will be dropped.
+// the queue is full. If this channel is full, the error will be dropped. The one exception is the error reporting
+// that the client has died and will not reconnect, which displaces the oldest queued error rather than being
+// dropped, so a consumer that reads the channel only after Send returns ErrClientDead can still find out why.
 func (c *Client) Notify() <-chan NotifyError {
 	return c.notifier
 }
@@ -502,31 +520,68 @@ func (c *Client) Send(ctx context.Context, msg msgs.Msg, options ...SendOption) 
 		return fmt.Errorf("%w: %w", err, ErrValidation)
 	}
 
-	select {
-	case c.sendCh <- msg:
-	default:
+	if !chans.TryPut(c.sendCh, msg) {
 		return ErrQueueFull
 	}
+
 	return nil
 }
 
 // sendNotify sends a notification to the notifier channel. If the channel is full, the notification is dropped.
 func (c *Client) sendNotify(err error) {
-	if c.notifier == nil || err == nil {
+	notice, ok := c.notice(err)
+	if !ok {
 		return
 	}
 
-	notice := NotifyError{
-		Err:  err,
-		Time: time.Now().UTC(),
+	if !chans.TryPut(c.notifier, notice) {
+		c.logDrop(err)
+	}
+}
+
+// sendNotifyDead sends the notification that the client has died and will not reconnect. Unlike sendNotify,
+// it does not drop the notification when the channel is full: it evicts the oldest notification to make room
+// and retries until it lands. A dying client has usually just filled the channel with the connection errors
+// that led here, and this error is the only report of why we stopped, since Send only returns a bare
+// ErrClientDead.
+//
+// The retry cannot spin forever. A channel with no buffer can never make room, so it is handled before the
+// loop. Otherwise every producer that takes the slot we just freed is a sendNotify call that then returns:
+// by the time we are called reconnect has given up, so the only producers left are the closeAuditConn
+// goroutines, which notify at most once each and are no longer being created.
+func (c *Client) sendNotifyDead(err error) {
+	notice, ok := c.notice(err)
+	if !ok {
+		return
 	}
 
-	select {
-	case c.notifier <- notice:
-	default:
-		if c.log != nil {
-			c.log.Error("audit.Client notifier channel is full, dropping notification", slog.Any("error", err))
+	if cap(c.notifier) == 0 {
+		c.logDrop(err)
+		return
+	}
+
+	for !chans.TryPut(c.notifier, notice) {
+		// Closed ignored, as TryPut() would have paniced.
+		evicted, ok, _ := chans.TryGet((<-chan NotifyError)(c.notifier))
+		if ok && c.log != nil {
+			c.log.Error("audit.Client notifier channel is full, evicting notification for the client death notice", slog.Any("error", evicted.Err))
 		}
+	}
+}
+
+// notice wraps err in a NotifyError. ok is false if there is nothing to send, either because the client has
+// no notifier or because err is nil.
+func (c *Client) notice(err error) (notice NotifyError, ok bool) {
+	if c.notifier == nil || err == nil {
+		return NotifyError{}, false
+	}
+	return NotifyError{Err: err, Time: time.Now().UTC()}, true
+}
+
+// logDrop logs that err could not be delivered on the notifier channel.
+func (c *Client) logDrop(err error) {
+	if c.log != nil {
+		c.log.Error("audit.Client notifier channel is full, dropping notification", slog.Any("error", err))
 	}
 }
 
