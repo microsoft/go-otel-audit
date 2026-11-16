@@ -11,7 +11,7 @@ While everything in this is publically available, the main audience is Microsoft
 
 ## Requirements
 
-Go 1.26.9 or later.
+Go 1.26.11 or later.
 
 ## Usage
 
