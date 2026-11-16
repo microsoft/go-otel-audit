@@ -9,6 +9,10 @@ uses Geneva Monitoring format to send audit events to the Geneva Monitoring serv
 
 While everything in this is publically available, the main audience is Microsoft first party developers.
 
+## Requirements
+
+Go 1.26.9 or later.
+
 ## Usage
 
 Using this package will require some service setup that is beyond the scope of this guide.
